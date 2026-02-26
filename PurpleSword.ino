@@ -24,6 +24,7 @@
 #include <WebServer.h>
 #include <ArduinoOTA.h>
 #include <ESPmDNS.h>
+#include <esp_now.h>
 
 // ─── PIN CONFIGURATION ────────────────────────────────────────────────
 #define LED_PIN       D7
@@ -75,6 +76,9 @@ bool     lastButton   = HIGH;
 bool     boostMode    = false; // true while D8 is held > BOOST_HOLD_MS
 uint32_t buttonDownMs = 0;     // millis() when button last went LOW
 #define  BOOST_HOLD_MS 500     // hold threshold (ms)
+#define  SYNC_ANIM_MS  2000    // triple-click+hold animation duration (ms)
+#define  SYNC_MSG_MODE 0x01    // ESP-NOW packet: mode changed
+#define  SYNC_MSG_PING 0x02    // ESP-NOW packet: presence beacon
 
 // ─── G-FORCE BLOB PHYSICS ─────────────────────────────────────────────
 // A bright violet blob is pushed toward the tip by swing force.
@@ -127,6 +131,16 @@ bool      ballsReady  = false;
 float     whirlPhase  = 0.0f;   // accumulates twist → whirlwind hue wave
 float     stabImpulse = 0.0f;   // one-shot stab push magnitude
 float     prevAZ      = 0.0f;   // previous accelZ sample for derivative
+
+// ─── ESP-NOW SYNC STATE ────────────────────────────────────────────────
+bool      syncEnabled   = false;   // true = broadcast/receive topMode changes
+bool      syncAnimating = false;   // true during 2-second arm animation
+uint32_t  syncAnimStart = 0;
+volatile bool    syncGotPacket = false;
+volatile uint8_t syncInType    = 0;
+volatile uint8_t syncInMode    = 0;
+struct SyncPacket { uint8_t type; uint8_t mode; };
+uint8_t broadcastAddr[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 
 // =====================================================================
@@ -783,6 +797,52 @@ void renderBoostSparks() {
 
 
 // =====================================================================
+// ESP-NOW SYNC — receive callback, send helper, setup
+// =====================================================================
+
+// Called from ESP-NOW task context — only set flags, no heavy work.
+void onSyncReceive(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
+  if (len < (int)sizeof(SyncPacket)) return;
+  SyncPacket pkt;
+  memcpy(&pkt, data, sizeof(SyncPacket));
+  syncInType    = pkt.type;
+  syncInMode    = pkt.mode;
+  syncGotPacket = true;
+}
+
+void sendSyncPacket(uint8_t type, uint8_t mode) {
+  SyncPacket pkt = { type, mode };
+  esp_now_send(broadcastAddr, (uint8_t*)&pkt, sizeof(SyncPacket));
+}
+
+void setupESPNow() {
+  if (esp_now_init() != ESP_OK) { Serial.println("ESP-NOW init failed"); return; }
+  esp_now_register_recv_cb(onSyncReceive);
+  esp_now_peer_info_t peer = {};
+  memcpy(peer.peer_addr, broadcastAddr, 6);
+  peer.channel = 0;  peer.encrypt = false;
+  if (esp_now_add_peer(&peer) != ESP_OK) Serial.println("ESP-NOW peer failed");
+  else Serial.println("ESP-NOW ready");
+}
+
+// 2-second cyan sweep hilt→tip (sync-arm animation)
+void renderSyncAnim(float progress) {
+  bladeClear();
+  int lit = constrain((int)(progress * BLADE_HALF), 0, BLADE_HALF - 1);
+  for (int i = 0; i <= lit; i++) bladeSet(i, CRGB(0, 50, 80));
+  bladeSet(lit, CRGB(255, 255, 255));     // bright leading-edge pixel
+}
+
+// Subtle cyan pulse at the hilt end — "sync active" indicator overlay
+void renderSyncIndicator() {
+  float   pulse = (sinf((float)millis() * 0.004f) + 1.0f) * 0.5f;
+  uint8_t bri   = (uint8_t)(pulse * 70.0f + 15.0f);
+  leds[0]            += CRGB(0, bri, bri);   // hilt side A
+  leds[NUM_LEDS - 1] += CRGB(0, bri, bri);   // hilt side B
+}
+
+
+// =====================================================================
 // OTA VISUAL
 // =====================================================================
 void renderOTAMode() {
@@ -822,6 +882,7 @@ void setupWiFiOTA() {
   ArduinoOTA.onEnd([]()                           { Serial.println("OTA End"); });
   ArduinoOTA.onError([](ota_error_t e)            { Serial.printf("OTA Error[%u]\n", e); });
   ArduinoOTA.begin();
+  setupESPNow();
 }
 
 
@@ -853,7 +914,7 @@ void setup() {
   FastLED.show();
 
   setupWiFiOTA();
-  Serial.println("Ready.  Click=sub-effect(Chase/Pulse/Ripple)  DblClick=Painter");
+  Serial.println("Ready.  DblClick=mode  TripleHold=sync  Hold=boost");
 }
 
 
@@ -866,7 +927,22 @@ void loop() {
 
   updateIMU();
 
-  // ── Button: HOLD=boost  DOUBLE-CLICK=Effects↔Painter  SINGLE-CLICK=nothing
+  // ── Handle incoming ESP-NOW sync packet (flag set by callback) ────────
+  if (syncGotPacket) {
+    syncGotPacket = false;
+    if (syncEnabled && syncInType == SYNC_MSG_MODE) {
+      topMode        = syncInMode % 3;
+      pnt.ready      = false;
+      pntCompressPos = 0.0f;
+      pntCompressVel = 0.0f;
+      ballsReady     = false;
+      bladeClear();
+      const char* names[] = { "Effects", "Painter", "Balls" };
+      Serial.printf("Sync recv: %s\n", names[topMode]);
+    }
+  }
+
+  // ── Button: HOLD=boost  DOUBLE-CLICK=mode  TRIPLE-CLICK+HOLD=sync arm ─
   bool btn = digitalRead(BUTTON_PIN);
   if (btn == LOW && lastButton == HIGH) {
     uint32_t now = millis();
@@ -876,8 +952,16 @@ void loop() {
       buttonDownMs = now;
     }
   }
-  // Activate boost once held long enough (cancels pending click)
-  if (btn == LOW && !boostMode && millis() - buttonDownMs > BOOST_HOLD_MS) {
+  // Triple-click + hold → start 2-second sync-arm animation
+  if (!syncAnimating && clickCount >= 3 && btn == LOW && millis() - buttonDownMs > 80) {
+    syncAnimating = true;
+    syncAnimStart = millis();
+    clickCount    = 0;
+    boostMode     = false;
+  }
+  // Boost: hold from a fresh press (no pending multi-click, not syncing)
+  if (btn == LOW && !boostMode && !syncAnimating && clickCount < 3 &&
+      millis() - buttonDownMs > BOOST_HOLD_MS) {
     boostMode  = true;
     clickCount = 0;
   }
@@ -887,9 +971,9 @@ void loop() {
   }
   lastButton = btn;
 
-  // Dispatch after double-click window (only if not held into boost)
-  if (!boostMode && clickCount > 0 && millis() - lastClickMs > DCLICK_MS) {
-    if (clickCount >= 2) {
+  // Dispatch after click window (not held into boost/sync)
+  if (!boostMode && !syncAnimating && clickCount > 0 && millis() - lastClickMs > DCLICK_MS) {
+    if (clickCount == 2) {   // exactly double-click → cycle mode
       topMode        = (topMode + 1) % 3;
       pnt.ready      = false;
       pntCompressPos = 0.0f;
@@ -898,11 +982,42 @@ void loop() {
       bladeClear();
       const char* names[] = { "Effects", "Painter", "Balls" };
       Serial.printf("Mode: %s\n", names[topMode]);
+      if (syncEnabled) sendSyncPacket(SYNC_MSG_MODE, topMode);  // broadcast to peers
     }
-    // Single click: discard silently
+    // Single-click and 3+ quick clicks: discard silently
     clickCount = 0;
   }
 
+  // ── Sync-arm animation (triple-click + hold for 2 seconds) ───────────
+  if (syncAnimating) {
+    float progress = (float)(millis() - syncAnimStart) / (float)SYNC_ANIM_MS;
+    if (btn == HIGH) {
+      // Released before complete — cancel silently
+      syncAnimating = false;
+    } else if (progress >= 1.0f) {
+      // Held full 2 seconds — toggle sync on/off
+      syncAnimating = false;
+      syncEnabled   = !syncEnabled;
+      Serial.printf("Sync: %s  MAC: %s\n",
+                    syncEnabled ? "ON" : "OFF", WiFi.macAddress().c_str());
+      // Confirm flash: cyan = on, orange = off (3 blinks)
+      CRGB flashCol = syncEnabled ? CRGB(0, 100, 100) : CRGB(100, 40, 0);
+      for (int f = 0; f < 3; f++) {
+        for (int i = 0; i < BLADE_HALF; i++) bladeSet(i, flashCol);
+        FastLED.show(); delay(150);
+        bladeClear(); FastLED.show(); delay(100);
+      }
+    } else {
+      // Still animating — render sweep and return early
+      renderSyncAnim(progress);
+      FastLED.setBrightness(BRIGHTNESS);
+      FastLED.show();
+      delay(16);
+      return;
+    }
+  }
+
+  // ── Effects ────────────────────────────────────────────────────────────
   if (topMode == 1) {
     effectPainter();
   } else if (topMode == 2) {
@@ -927,6 +1042,10 @@ void loop() {
   } else {
     FastLED.setBrightness(BRIGHTNESS);
   }
+
+  // Sync-active indicator: subtle cyan pulse at hilt pixels
+  if (syncEnabled) renderSyncIndicator();
+
   FastLED.show();
   delay(16);   // ~60 fps
 }
