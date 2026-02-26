@@ -77,8 +77,9 @@ bool     boostMode    = false; // true while D8 is held > BOOST_HOLD_MS
 uint32_t buttonDownMs = 0;     // millis() when button last went LOW
 #define  BOOST_HOLD_MS 500     // hold threshold (ms)
 #define  SYNC_ANIM_MS  2000    // triple-click+hold animation duration (ms)
-#define  SYNC_MSG_MODE 0x01    // ESP-NOW packet: mode changed
-#define  SYNC_MSG_PING 0x02    // ESP-NOW packet: presence beacon
+#define  SYNC_MSG_MODE   0x01    // ESP-NOW packet: mode changed
+#define  SYNC_MSG_PING   0x02    // ESP-NOW packet: presence beacon
+#define  SYNC_SEARCH_MS  60000   // discovery window: 60 seconds
 
 // ─── G-FORCE BLOB PHYSICS ─────────────────────────────────────────────
 // A bright violet blob is pushed toward the tip by swing force.
@@ -133,9 +134,12 @@ float     stabImpulse = 0.0f;   // one-shot stab push magnitude
 float     prevAZ      = 0.0f;   // previous accelZ sample for derivative
 
 // ─── ESP-NOW SYNC STATE ────────────────────────────────────────────────
-bool      syncEnabled   = false;   // true = broadcast/receive topMode changes
-bool      syncAnimating = false;   // true during 2-second arm animation
-uint32_t  syncAnimStart = 0;
+bool      syncEnabled    = false;   // true = paired with another sword
+bool      syncSearching  = false;   // true during 60-second discovery window
+uint32_t  syncSearchStart = 0;
+uint32_t  lastPingMs     = 0;
+bool      syncAnimating  = false;   // true during 2-second arm animation
+uint32_t  syncAnimStart  = 0;
 volatile bool    syncGotPacket = false;
 volatile uint8_t syncInType    = 0;
 volatile uint8_t syncInMode    = 0;
@@ -181,21 +185,58 @@ static int16_t imuRead16(uint8_t reg) {
 
 void setupIMU() {
   Wire.begin(SDA_PIN, SCL_PIN);
-  imuWrite(0x6B, 0x00);   // wake from sleep
-  delay(10);
+  Wire.setClock(100000);   // 100 kHz — reliable for MPU6050 initial contact
+  delay(150);              // MPU6050 needs up to 100 ms after power-on
 
-  Wire.beginTransmission(IMU_ADDR);
-  Wire.write(0x75);        // WHO_AM_I register
-  Wire.endTransmission(false);
-  Wire.requestFrom(IMU_ADDR, (uint8_t)1);
-  uint8_t id = Wire.available() ? Wire.read() : 0x00;
+  // ── Step 1: I2C presence check — does 0x68 ACK at all? ───────────
+  Wire.beginTransmission(0x68);
+  uint8_t err = Wire.endTransmission();
+  if (err != 0) {
+    Serial.printf("MPU6050: no ACK at 0x68 (I2C error %u) — check SDA/SCL wiring\n", err);
+    Wire.beginTransmission(0x69);
+    if (Wire.endTransmission() == 0)
+      Serial.println("  → found something at 0x69 — is AD0 pin HIGH? Change IMU_ADDR to 0x69");
+    imuOk = false;
+    return;
+  }
 
-  // MPU6050=0x68, ICM-20689=0x98, MPU9250=0x71/0x73, MPU6500=0x70
-  imuOk = (id == 0x68 || id == 0x70 || id == 0x71 || id == 0x73 || id == 0x98);
-  Serial.printf("IMU WHO_AM_I: 0x%02X  %s\n", id, imuOk ? "OK" : "NOT FOUND");
+  // ── Step 2: Read WHO_AM_I — MPU6050 must return 0x68 ─────────────
+  Wire.beginTransmission(0x68);
+  Wire.write(0x75);
+  err = Wire.endTransmission(false);
+  if (err != 0) {
+    Serial.printf("MPU6050: WHO_AM_I write failed (I2C error %u)\n", err);
+    imuOk = false;
+    return;
+  }
+  Wire.requestFrom((uint8_t)0x68, (uint8_t)1);
+  uint8_t id = Wire.available() ? Wire.read() : 0xFF;
+  if (id != 0x68) {
+    Serial.printf("MPU6050: WHO_AM_I = 0x%02X, expected 0x68 — not an MPU6050\n", id);
+    imuOk = false;
+    return;
+  }
 
-  imuWrite(0x1B, 0x08);   // Gyro  ±500 dps
-  imuWrite(0x1C, 0x00);   // Accel ±2 g
+  // ── Step 3: Wake from sleep (PWR_MGMT_1 = 0x00) ──────────────────
+  Wire.beginTransmission(0x68);
+  Wire.write(0x6B);
+  Wire.write(0x00);
+  Wire.endTransmission();
+  delay(50);   // let sensor stabilise after wake
+
+  // ── Step 4: Configure ranges ──────────────────────────────────────
+  Wire.beginTransmission(0x68);
+  Wire.write(0x1B);
+  Wire.write(0x08);   // Gyro ±500 dps
+  Wire.endTransmission();
+
+  Wire.beginTransmission(0x68);
+  Wire.write(0x1C);
+  Wire.write(0x00);   // Accel ±2 g
+  Wire.endTransmission();
+
+  imuOk = true;
+  Serial.println("MPU6050: found and configured at 0x68");
 }
 
 void updateIMU() {
@@ -833,6 +874,20 @@ void renderSyncAnim(float progress) {
   bladeSet(lit, CRGB(255, 255, 255));     // bright leading-edge pixel
 }
 
+// Searching visual: alternating 10-LED red/purple bands that scroll slowly
+void renderSyncSearching() {
+  static float offset = 0.0f;
+  offset += 0.3f;
+  if (offset >= 20.0f) offset -= 20.0f;
+  float   pulse = 0.55f + 0.45f * sinf((float)millis() * 0.003f);
+  uint8_t val   = (uint8_t)(200.0f * pulse);
+  int     off   = (int)offset;
+  for (int i = 0; i < BLADE_HALF; i++) {
+    uint8_t hue = (((i + off) / 10) % 2) ? 192 : 0;   // 192=purple  0=red
+    bladeSet(i, CHSV(hue, 255, val));
+  }
+}
+
 // Subtle cyan pulse at the hilt end — "sync active" indicator overlay
 void renderSyncIndicator() {
   float   pulse = (sinf((float)millis() * 0.004f) + 1.0f) * 0.5f;
@@ -925,12 +980,23 @@ void loop() {
   ArduinoOTA.handle();
   if (otaActive) { renderOTAMode(); return; }
 
+  // ── WiFi reconnect watchdog — restores OTA visibility if link drops ───
+  static uint32_t wifiCheckMs = 0;
+  if (millis() - wifiCheckMs > 30000) {
+    wifiCheckMs = millis();
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("WiFi lost — reconnecting...");
+      WiFi.reconnect();
+    }
+  }
+
   updateIMU();
 
   // ── Handle incoming ESP-NOW sync packet (flag set by callback) ────────
   if (syncGotPacket) {
     syncGotPacket = false;
-    if (syncEnabled && syncInType == SYNC_MSG_MODE) {
+    if (syncInType == SYNC_MSG_MODE && syncEnabled) {
+      // Paired peer changed mode — apply it here
       topMode        = syncInMode % 3;
       pnt.ready      = false;
       pntCompressPos = 0.0f;
@@ -939,6 +1005,23 @@ void loop() {
       bladeClear();
       const char* names[] = { "Effects", "Painter", "Balls" };
       Serial.printf("Sync recv: %s\n", names[topMode]);
+    } else if (syncInType == SYNC_MSG_PING) {
+      if (syncSearching) {
+        // Found a peer! Pair up and confirm back so they pair too.
+        syncSearching = false;
+        syncEnabled   = true;
+        sendSyncPacket(SYNC_MSG_PING, topMode);
+        Serial.println("Sync: PAIRED");
+        CRGB fc = CRGB(0, 100, 100);
+        for (int f = 0; f < 3; f++) {
+          for (int i = 0; i < BLADE_HALF; i++) bladeSet(i, fc);
+          FastLED.show(); delay(150);
+          bladeClear(); FastLED.show(); delay(100);
+        }
+      } else if (syncEnabled) {
+        // Already paired — respond so a newly-searching sword can find us
+        sendSyncPacket(SYNC_MSG_PING, topMode);
+      }
     }
   }
 
@@ -954,10 +1037,11 @@ void loop() {
   }
   // Triple-click + hold → start 2-second sync-arm animation
   if (!syncAnimating && clickCount >= 3 && btn == LOW && millis() - buttonDownMs > 80) {
-    syncAnimating = true;
-    syncAnimStart = millis();
-    clickCount    = 0;
-    boostMode     = false;
+    syncAnimating  = true;
+    syncAnimStart  = millis();
+    syncSearching  = false;   // cancel any ongoing search
+    clickCount     = 0;
+    boostMode      = false;
   }
   // Boost: hold from a fresh press (no pending multi-click, not syncing)
   if (btn == LOW && !boostMode && !syncAnimating && clickCount < 3 &&
@@ -995,17 +1079,29 @@ void loop() {
       // Released before complete — cancel silently
       syncAnimating = false;
     } else if (progress >= 1.0f) {
-      // Held full 2 seconds — toggle sync on/off
       syncAnimating = false;
-      syncEnabled   = !syncEnabled;
-      Serial.printf("Sync: %s  MAC: %s\n",
-                    syncEnabled ? "ON" : "OFF", WiFi.macAddress().c_str());
-      // Confirm flash: cyan = on, orange = off (3 blinks)
-      CRGB flashCol = syncEnabled ? CRGB(0, 100, 100) : CRGB(100, 40, 0);
-      for (int f = 0; f < 3; f++) {
-        for (int i = 0; i < BLADE_HALF; i++) bladeSet(i, flashCol);
-        FastLED.show(); delay(150);
-        bladeClear(); FastLED.show(); delay(100);
+      if (syncEnabled) {
+        // Already paired — turn sync off
+        syncEnabled = false;
+        Serial.println("Sync: OFF");
+        CRGB fc = CRGB(100, 40, 0);
+        for (int f = 0; f < 3; f++) {
+          for (int i = 0; i < BLADE_HALF; i++) bladeSet(i, fc);
+          FastLED.show(); delay(150);
+          bladeClear(); FastLED.show(); delay(100);
+        }
+      } else {
+        // Start 60-second discovery window
+        syncSearching  = true;
+        syncSearchStart = millis();
+        lastPingMs     = 0;
+        Serial.printf("Sync: searching 60s  MAC: %s\n", WiFi.macAddress().c_str());
+        CRGB fc = CRGB(0, 80, 100);
+        for (int f = 0; f < 3; f++) {
+          for (int i = 0; i < BLADE_HALF; i++) bladeSet(i, fc);
+          FastLED.show(); delay(150);
+          bladeClear(); FastLED.show(); delay(100);
+        }
       }
     } else {
       // Still animating — render sweep and return early
@@ -1017,8 +1113,27 @@ void loop() {
     }
   }
 
-  // ── Effects ────────────────────────────────────────────────────────────
-  if (topMode == 1) {
+  // ── Sync search: broadcast pings every 500 ms, timeout after 60 s ────
+  if (syncSearching) {
+    if (millis() - syncSearchStart >= SYNC_SEARCH_MS) {
+      syncSearching = false;
+      Serial.println("Sync: search timed out — no peer found");
+      CRGB fc = CRGB(100, 40, 0);
+      for (int f = 0; f < 3; f++) {
+        for (int i = 0; i < BLADE_HALF; i++) bladeSet(i, fc);
+        FastLED.show(); delay(150);
+        bladeClear(); FastLED.show(); delay(100);
+      }
+    } else if (millis() - lastPingMs > 500) {
+      sendSyncPacket(SYNC_MSG_PING, topMode);
+      lastPingMs = millis();
+    }
+  }
+
+  // ── Effects (or sync-searching override) ──────────────────────────────
+  if (syncSearching) {
+    renderSyncSearching();
+  } else if (topMode == 1) {
     effectPainter();
   } else if (topMode == 2) {
     effectBalls();
@@ -1030,9 +1145,11 @@ void loop() {
     }
   }
 
-  // G-force blob — physics-driven, layered on top of all effects
-  updateBlobPhysics();
-  renderGBlob();
+  // G-force blob — skip during sync search (blade is already taken)
+  if (!syncSearching) {
+    updateBlobPhysics();
+    renderGBlob();
+  }
 
   if (boostMode) {
     renderBoostSparks();
@@ -1043,7 +1160,7 @@ void loop() {
     FastLED.setBrightness(BRIGHTNESS);
   }
 
-  // Sync-active indicator: subtle cyan pulse at hilt pixels
+  // Sync indicator: subtle cyan pulse at hilt while paired
   if (syncEnabled) renderSyncIndicator();
 
   FastLED.show();
