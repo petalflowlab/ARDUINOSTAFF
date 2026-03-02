@@ -7,13 +7,18 @@ void renderAudioPulseEffect(float dt) {
   static uint32_t lastDarkWave = 0;
   uint32_t now=millis();
   float sm=globalSpeed/128.0f;
-  int ci=STAFF_LENGTH/2;
+  float ty = mpu_ready ? clampf(accel[1], -1.0f, 1.0f) : 0.0f;
+  static float lastAccelY1 = 0;
+  float jerk = mpu_ready ? clampf((ty - lastAccelY1)*5.0f, -3.0f, 3.0f) : 0.0f;
+  lastAccelY1 = ty;
+  int ci = STAFF_LENGTH/2 + (int)(ty * (STAFF_LENGTH/2.5f));
+  ci = constrain(ci, 4, STAFF_LENGTH-5);
   pp+=dt*(3+audioLevel*5)*sm; if(pp>6.283f)pp-=6.283f;
   float pi2=(sin(pp)*0.5f+0.5f)*(0.3f+audioLevel*0.7f);
   
   for(int i=0;i<STAFF_LENGTH;i++){
-    float d=fabs((float)i-ci)/(float)ci;
-    uint8_t bh=220+(uint8_t)(sin(now*0.0005f+d*2)*10);
+    float d=fabs((float)i-ci)/((float)STAFF_LENGTH*0.5f);
+    uint8_t bh=(uint8_t)(220+sin(now*0.0005f+d*2)*10 + vortexPhase*50);
     uint8_t bv=80-(uint8_t)(d*30);
     float w=sin(d*15-pp*3)*0.5f+0.5f;
     uint8_t pv=(uint8_t)(pi2*w*180 + 25);
@@ -60,7 +65,7 @@ void renderAudioPulseEffect(float dt) {
     }
   }
   
-  if(pseudoBeat&&beatIntensity>0.18f){
+  if((pseudoBeat&&beatIntensity>0.18f) || fabs(jerk) > 1.5f){
     explosionRadius = 0;
     lastExplosion = now;
     htState.headImpactIntensity=beatIntensity*1.8f;
@@ -118,16 +123,21 @@ void renderBeatSparkleEffect(float dt) {
   static uint32_t lastBeat = 0;
   uint32_t now=millis();
   float sm=globalSpeed/128.0f;
-  int ci=STAFF_LENGTH/2;
+  float ty = mpu_ready ? clampf(accel[1], -1.0f, 1.0f) : 0.0f;
+  static float lastAccelY2 = 0;
+  float jerk = mpu_ready ? clampf((ty - lastAccelY2)*5.0f, -3.0f, 3.0f) : 0.0f;
+  lastAccelY2 = ty;
+  int ci = STAFF_LENGTH/2 + (int)(ty * (STAFF_LENGTH/2.5f));
+  ci = constrain(ci, 4, STAFF_LENGTH-5);
   fadeToBlackBy(leds+HEAD_LENGTH,STAFF_LENGTH,35);
   
   for(int i=0;i<STAFF_LENGTH;i++){
-    float d=fabs((float)i-ci)/(float)ci;
-    uint8_t val=(uint8_t)(80-d*40 + audioLevel*60);
-    leds[HEAD_LENGTH+i]=CHSV(220,200,val);
+    float d=fabs((float)i-ci)/((float)STAFF_LENGTH*0.5f);
+    uint8_t val=(uint8_t)(max(0.0f, 80-d*40 + audioLevel*60));
+    leds[HEAD_LENGTH+i]=CHSV((uint8_t)(220+vortexPhase*40),200,val);
   }
   
-  if(pseudoBeat&&beatIntensity>0.15f){
+  if((pseudoBeat&&beatIntensity>0.15f) || fabs(jerk) > 1.5f){
     beatRing = 0;
     lastBeat = now;
     htState.headImpactIntensity=beatIntensity*1.5f;
@@ -190,7 +200,12 @@ void renderSoundWaveEffect(float dt) {
   static float wh[100]; static int wi=0;
   uint32_t now=millis();
   float sm=globalSpeed/128.0f;
-  int ci=STAFF_LENGTH/2;
+  float ty = mpu_ready ? clampf(accel[1], -1.0f, 1.0f) : 0.0f;
+  static float lastAccelY3 = 0;
+  float jerk = mpu_ready ? clampf((ty - lastAccelY3)*5.0f, -3.0f, 3.0f) : 0.0f;
+  lastAccelY3 = ty;
+  int ci = STAFF_LENGTH/2 + (int)(ty * (STAFF_LENGTH/2.5f));
+  ci = constrain(ci, 4, STAFF_LENGTH-5);
   wh[wi]=audioLevel*1.5f; wi=(wi+1)%100;
   
   for(int i=0;i<STAFF_LENGTH;i++){
@@ -203,7 +218,7 @@ void renderSoundWaveEffect(float dt) {
     uint8_t val;
     
     if(lv > 0.6f) {
-      hue = 180;
+      hue = (uint8_t)(180 + vortexPhase*30);
       sat = 255;
       val = (uint8_t)(lv*255);
     } else if(lv > 0.3f) {
@@ -219,7 +234,7 @@ void renderSoundWaveEffect(float dt) {
     leds[HEAD_LENGTH+i]=CHSV(hue, sat, val);
   }
   
-  if(pseudoBeat&&beatIntensity>0.20f){
+  if((pseudoBeat&&beatIntensity>0.20f) || fabs(jerk) > 1.5f){
     static unsigned long lbt=0; static float be=0;
     if(now-lbt>100){lbt=now;be=0;}
     be+=dt*sm*40;
@@ -251,19 +266,24 @@ void renderColorShiftEffect(float dt) {
   static bool waveDirection = true;
   uint32_t now=millis();
   float sm=globalSpeed/128.0f;
-  int ci=STAFF_LENGTH/2;
+  float ty = mpu_ready ? clampf(accel[1], -1.0f, 1.0f) : 0.0f;
+  static float lastAccelY4 = 0;
+  float jerk = mpu_ready ? clampf((ty - lastAccelY4)*5.0f, -3.0f, 3.0f) : 0.0f;
+  lastAccelY4 = ty;
+  int ci = STAFF_LENGTH/2 + (int)(ty * (STAFF_LENGTH/2.5f));
+  ci = constrain(ci, 4, STAFF_LENGTH-5);
   
-  cp+=dt*audioLevel*120*sm; if(cp>255)cp-=255;
+  cp+=dt*(audioLevel*120*sm + fabs(rollRate)*0.2f); if(cp>255)cp-=255;
   
   for(int i=0;i<STAFF_LENGTH;i++){
-    float d=fabs((float)i-ci)/ci;
+    float d=fabs((float)i-ci)/((float)STAFF_LENGTH*0.5f);
     uint8_t h=(uint8_t)(cp+d*80),s=200+(uint8_t)(audioLevel*55);
     uint8_t baseVal=100-(uint8_t)(d*50);
     uint8_t audioBoost=(uint8_t)(audioLevel*100);
     leds[HEAD_LENGTH+i]=CHSV(h,s,baseVal+audioBoost);
   }
   
-  if(pseudoBeat&&beatIntensity>0.25f){
+  if((pseudoBeat&&beatIntensity>0.25f) || fabs(jerk) > 1.5f){
     beatWaveOut = 0;
     beatWaveIn = ci;
     lastBeat = now;
@@ -322,12 +342,20 @@ void renderColorShiftEffect(float dt) {
 void renderAudioFireEffect(float dt) {
   static byte heat[144]; static uint32_t lu=0;
   uint32_t now=millis();
-  int ci=STAFF_LENGTH/2;
+  float ty = mpu_ready ? clampf(accel[1], -1.0f, 1.0f) : 0.0f;
+  static float lastAccelY5 = 0;
+  float jerk = mpu_ready ? clampf((ty - lastAccelY5)*5.0f, -3.0f, 3.0f) : 0.0f;
+  lastAccelY5 = ty;
+  static float simCi = STAFF_LENGTH/2;
+  float targetCi = STAFF_LENGTH/2 + ty * (STAFF_LENGTH/2.5f);
+  simCi = simCi*0.9f + targetCi*0.1f;
+  int ci = constrain((int)simCi, 4, STAFF_LENGTH-5);
+
   if(now-lu<50)return; lu=now;
   
   for(int i=0;i<STAFF_LENGTH;i++){int cd=random(8,18);heat[i]=(heat[i]>cd)?heat[i]-cd:0;}
-  for(int k=0;k<ci-1;k++) heat[k]=(heat[k+1]+heat[k+2])/2;
-  for(int k=STAFF_LENGTH-1;k>ci+1;k--) heat[k]=(heat[k-1]+heat[k-2])/2;
+  for(int k=0;k<ci-1;k++) heat[k]=(byte)((heat[k+1]+heat[k+2])/2);
+  for(int k=STAFF_LENGTH-1;k>ci+1;k--) heat[k]=(byte)((heat[k-1]+heat[k-2])/2);
   
   for(int i=0;i<STAFF_LENGTH;i++){
     float d=fabs((float)i-ci)/(float)ci;
@@ -339,7 +367,7 @@ void renderAudioFireEffect(float dt) {
     if(pos>=0&&pos<STAFF_LENGTH)heat[pos]=constrain(heat[pos]+random(160,220),0,255);
   }
   
-  if(pseudoBeat&&beatIntensity>0.18f){
+  if((pseudoBeat&&beatIntensity>0.18f) || fabs(jerk) > 1.5f){
     for(int i=-8;i<=8;i++){
       int pos=ci+i;
       if(pos>=0&&pos<STAFF_LENGTH){
@@ -357,17 +385,24 @@ void renderAudioFireEffect(float dt) {
   
   for(int i=0;i<STAFF_LENGTH;i++){
     byte t=heat[i]; uint8_t r,g,b;
+    uint8_t rollHueShift = (uint8_t)(vortexPhase * 40.0f);
     if(t>200){r=255;g=255;b=random(80,150);}
     else if(t>150){r=255;g=random(100,180);b=0;}
     else if(t>100){r=255;g=random(40,100);b=0;}
     else if(t>50){r=220+random(35);g=random(15,35);b=0;}
     else{r=t*3;g=0;b=0;}
-    leds[HEAD_LENGTH+i]=CRGB(r,g,b);
+    CRGB color = CRGB(r,g,b);
+    if (fabs(rollRate) > 30.0f) {
+      CHSV hsv = rgb2hsv_approximate(color);
+      hsv.hue += rollHueShift;
+      color = hsv;
+    }
+    leds[HEAD_LENGTH+i]=color;
   }
   if(!customColorMode){headHue=0;headSat=255;headVal=180+beatIntensity*75;tailHue=20;tailSat=255;tailVal=180+beatIntensity*75;}
   
-  if(pseudoBeat&&beatIntensity>0.18f){
-    htState.centerImpactIntensity = beatIntensity * 2.0f;
+  if((pseudoBeat&&beatIntensity>0.18f) || fabs(jerk) > 1.5f){
+    htState.centerImpactIntensity = max(htState.centerImpactIntensity, 2.0f);
   }
   
   updateHeadTailReactivity(dt,0.8f,0);

@@ -65,6 +65,7 @@ void renderPurpleBlobEffect(float dt) {
   if (vortexIntensity > 0.01f) renderVortexOverlay();
   if(!customColorMode){headHue=235;headSat=200;headVal=220;tailHue=240;tailSat=200;tailVal=200;}
   renderHeadAndTail();
+  applyRollStrobePastel();
 }
 void renderRainbowPainterEffect(float dt) {
   uint32_t now=millis();
@@ -72,16 +73,34 @@ void renderRainbowPainterEffect(float dt) {
     for(int i=0;i<STAFF_LENGTH;i++) rainbowPainter.mixingBuffer[i]=(float)(i*256)/STAFF_LENGTH;
     rainbowPainter.initialized=true;
   }
-  if (mpu_ready){
-    float ty=clampf(accel[1]*0.4f,-1,1);
-    rainbowPainter.paintVelocity=rainbowPainter.paintVelocity*0.85f+ty*dt*6.0f;
-    rainbowPainter.paintCenter+=rainbowPainter.paintVelocity*dt;
-    if(rainbowPainter.paintCenter<0.1f){rainbowPainter.paintCenter=0.1f;rainbowPainter.paintVelocity=-rainbowPainter.paintVelocity*0.7f;htState.headImpactIntensity=clampf(fabs(rainbowPainter.paintVelocity)*3,0,1.5f);}
-    if(rainbowPainter.paintCenter>0.9f){rainbowPainter.paintCenter=0.9f;rainbowPainter.paintVelocity=-rainbowPainter.paintVelocity*0.7f;htState.tailImpactIntensity=clampf(fabs(rainbowPainter.paintVelocity)*3,0,1.5f);}
-  } else {
-    static float dp=0; dp+=dt*0.5f;
-    rainbowPainter.paintCenter=0.5f+sin(dp)*0.2f;
-    rainbowPainter.paintVelocity=cos(dp)*0.1f;
+  {
+    static float lastAccelYRP=0.0f;
+    float accelY=mpu_ready?clampf(accel[1]*0.8f,-1.2f,1.2f):0.0f;
+    float jerk=clampf((accelY-lastAccelYRP)*5.0f,-3.0f,3.0f); lastAccelYRP=accelY;
+    if (mpu_ready){
+      rainbowPainter.paintVelocity=rainbowPainter.paintVelocity*0.85f+(accelY*0.8f+jerk*1.2f)*dt*8.0f;
+      rainbowPainter.paintCenter+=rainbowPainter.paintVelocity*dt;
+      if(rainbowPainter.paintCenter<0.1f){
+        float spd=fabs(rainbowPainter.paintVelocity);
+        rainbowPainter.paintCenter=0.1f; rainbowPainter.paintVelocity=-rainbowPainter.paintVelocity*0.7f;
+        htState.headImpactIntensity=clampf(spd*3,0,1.5f);
+        if(spd>0.3f){rainbowPainter.crushDir=-1;rainbowPainter.crushFactor=min(rainbowPainter.crushFactor+spd*0.8f,1.0f);}
+      }
+      if(rainbowPainter.paintCenter>0.9f){
+        float spd=fabs(rainbowPainter.paintVelocity);
+        rainbowPainter.paintCenter=0.9f; rainbowPainter.paintVelocity=-rainbowPainter.paintVelocity*0.7f;
+        htState.tailImpactIntensity=clampf(spd*3,0,1.5f);
+        if(spd>0.3f){rainbowPainter.crushDir=1;rainbowPainter.crushFactor=min(rainbowPainter.crushFactor+spd*0.8f,1.0f);}
+      }
+    } else {
+      static float dp=0; dp+=dt*0.5f;
+      rainbowPainter.paintCenter=0.5f+sin(dp)*0.2f;
+      rainbowPainter.paintVelocity=cos(dp)*0.1f;
+    }
+    // Crush spring: underdamped (ζ≈0.64), period ~1.1 s — slight overshoot = decompression visual
+    rainbowPainter.crushVel+=(-30.0f*rainbowPainter.crushFactor-7.0f*rainbowPainter.crushVel)*dt;
+    rainbowPainter.crushFactor=clampf(rainbowPainter.crushFactor+rainbowPainter.crushVel*dt,-0.15f,1.0f);
+    if(rainbowPainter.crushFactor<0.005f&&fabs(rainbowPainter.crushVel)<0.05f){rainbowPainter.crushFactor=0.0f;rainbowPainter.crushVel=0.0f;}
   }
   rainbowPainter.centerHue+=dt*120; if(rainbowPainter.centerHue>=256) rainbowPainter.centerHue-=256;
   float bSize=0.12f+fabs(rainbowPainter.paintVelocity)*0.15f;
@@ -160,7 +179,17 @@ void renderRainbowPainterEffect(float dt) {
     }
   }
   for(int i=0;i<STAFF_LENGTH;i++){
-    uint8_t ph=(uint8_t)rainbowPainter.mixingBuffer[i];
+    // Crush warp: compress bands toward impact end on slam, decompress on spring-back
+    int bufIdx=i;
+    if(fabs(rainbowPainter.crushFactor)>0.01f){
+      float t=(float)i/(float)(STAFF_LENGTH-1);
+      // exponent < 1 packs bands toward tail (crushDir=+1); > 1 packs toward head (crushDir=-1)
+      float ex=1.0f-(float)rainbowPainter.crushDir*rainbowPainter.crushFactor*0.7f;
+      if(ex<0.1f) ex=0.1f;
+      float warped=(t>0.0f)?powf(t,ex):0.0f;
+      bufIdx=(int)(clampf(warped,0.0f,1.0f)*(STAFF_LENGTH-1));
+    }
+    uint8_t ph=(uint8_t)rainbowPainter.mixingBuffer[bufIdx];
     uint8_t s=255,v=120;
     float noise=sin(i*0.2f+now*0.0008f)*0.3f+0.7f; v=(uint8_t)(v*noise);
     int d=abs(i-ci);
@@ -199,44 +228,174 @@ void renderRainbowPainterEffect(float dt) {
     tailHue=(ch+30)%256;tailSat=255;tailVal=200;
   }
   renderHeadAndTail();
-}
-void renderFireStormEffect(float dt) {
-  static byte heat[144];
-  static uint32_t lu=0;
-  static float fb=0,fbv=0;
-  static float rPos[5]={0}; static unsigned long rT[5]={0}; static bool rA[5]={false};
-  uint32_t now=millis();
-  if(now-lu<50)return; lu=now;
-  if(mpu_ready){
-    float ty=clampf(accel[1]*0.5f,-1,1);
-    fbv=fbv*0.88f+ty*dt*8; fb+=fbv*dt*2;
-    if(fb<0.1f){fb=0.1f;fbv=-fbv*0.7f;htState.headImpactIntensity=1.5f;for(int i=0;i<5;i++)if(!rA[i]){rA[i]=true;rPos[i]=0.0f;rT[i]=now;break;}}
-    if(fb>0.9f){fb=0.9f;fbv=-fbv*0.7f;htState.tailImpactIntensity=1.5f;for(int i=0;i<5;i++)if(!rA[i]){rA[i]=true;rPos[i]=1.0f;rT[i]=now;break;}}
-  } else { static float sp=0;sp+=dt*0.5f;fb=0.5f+sin(sp)*0.3f;fbv=cos(sp)*0.2f; }
-  if(random(100)<3)for(int i=0;i<5;i++)if(!rA[i]){rA[i]=true;rPos[i]=0.5f;rT[i]=now;break;}
-  for(int i=0;i<STAFF_LENGTH;i++){int cd=random(10,25);heat[i]=(heat[i]>cd)?heat[i]-cd:0;}
-  for(int k=STAFF_LENGTH-1;k>=2;k--) heat[k]=(byte)((heat[k-1]*0.6f+heat[k-2]*0.4f));
-  int bi=(int)(fb*STAFF_LENGTH); int bri=8+(int)(fabs(fbv)*15);
-  for(int i=-bri;i<=bri;i++){int idx=bi+i;if(idx>=0&&idx<STAFF_LENGTH){float d=fabs(i)/(float)bri;int nh=heat[idx]+(int)((1-d)*200);heat[idx]=(nh>255)?255:(byte)nh;}}
-  for(int i=0;i<STAFF_LENGTH;i++){
-    byte t=heat[i]; uint8_t r,g,b;
-    if(t>200){r=255;g=255;b=random(30,80);}
-    else if(t>150){r=255;g=random(80,120);b=0;}
-    else if(t>100){r=255;g=random(30,80);b=0;}
-    else if(t>50){r=200+random(55);g=random(20,40);b=0;}
-    else{r=100+random(50);g=0;b=0;}
-    leds[HEAD_LENGTH+i]=CRGB(r,g,b);
-  }
-  for(int r=0;r<5;r++){
-    if(!rA[r])continue;
-    float rr=(now-rT[r])/800.0f*0.5f;
-    if(rr>0.5f){rA[r]=false;continue;}
-    for(int i=0;i<STAFF_LENGTH;i++){
-      float pos=(float)i/STAFF_LENGTH,dc=fabs(pos-rPos[r]),dr2=fabs(dc-rr);
-      if(dr2<0.05f){float ints=(1-dr2/0.05f)*(1-rr*2);leds[HEAD_LENGTH+i]+=CRGB((uint8_t)(ints*255),(uint8_t)(ints*100),0);}
+  if (mpu_ready && fabs(rollRate) > 55.0f) {
+    // Rainbow scan: hue sweeps across the staff at spin speed, energising the bands
+    float str = clampf((fabs(rollRate)-55.0f)/145.0f, 0.0f, 1.0f);
+    for (int i = 0; i < STAFF_LENGTH; i++) {
+      uint8_t h = (uint8_t)(fmod((float)i * 1.77f + vortexPhase * 100.0f, 256.0f));
+      leds[HEAD_LENGTH+i] = blend(leds[HEAD_LENGTH+i], CHSV(h, 255, 255), (uint8_t)(str * 160));
     }
   }
-  finishEffect(dt,fb,fbv, 0,255,220, 10,255,200);
+  applyRollStrobeRainbow();
+}
+void renderFireStormEffect(float dt) {
+  #define FS_FG_MAX 25
+  struct FSFG { float pos, vel, life; bool active; };
+  static byte     heat[144];
+  static uint32_t lu = 0;
+  static float    fb = 0, fbv = 0;
+  static float    rPos[5] = {0}; static unsigned long rT[5] = {0}; static bool rA[5] = {false};
+  static FSFG     fg[FS_FG_MAX];
+  static bool     fgInit = false;
+  static float    lastFbv       = 0.0f;
+  static float    bgDriftPhase  = 0.0f;   // slow hue+brightness drift for background embers
+  static float    blobStrobePh  = 0.0f;   // 10 Hz strobe on the moving blob only
+  static float    fsHtStrobePh  = 0.0f;   // 5 Hz red/orange strobe on head+tail during roll
+  if (!fgInit) { memset(fg, 0, sizeof(fg)); fgInit = true; }
+  uint32_t now = millis();
+
+  // Blob physics — fast, matching purple blob responsiveness
+  if (mpu_ready) {
+    static float lastAccelYFS = 0.0f;
+    float ty = clampf(accel[1]*0.8f, -1.2f, 1.2f);
+    float jk = clampf((ty-lastAccelYFS)*5.0f, -3.0f, 3.0f); lastAccelYFS = ty;
+    fbv = fbv*0.88f + (ty*1.8f + jk*1.5f)*dt*10.0f; fb += fbv*dt*2.5f;
+    if (fb < 0.1f) { fb=0.1f; fbv=-fbv*0.7f; htState.headImpactIntensity=1.5f; for(int i=0;i<5;i++) if(!rA[i]){rA[i]=true;rPos[i]=0.0f;rT[i]=now;break;} }
+    if (fb > 0.9f) { fb=0.9f; fbv=-fbv*0.7f; htState.tailImpactIntensity=1.5f; for(int i=0;i<5;i++) if(!rA[i]){rA[i]=true;rPos[i]=1.0f;rT[i]=now;break;} }
+  } else { static float sp=0; sp+=dt*0.5f; fb=0.5f+sin(sp)*0.3f; fbv=cos(sp)*0.2f; }
+
+  // Advance continuous phases every frame
+  bgDriftPhase += dt * 0.4f;  if (bgDriftPhase >= 6.2832f) bgDriftPhase -= 6.2832f;
+  blobStrobePh += dt * 10.0f; if (blobStrobePh >= 1.0f)    blobStrobePh -= 1.0f;
+  if (mpu_ready && fabs(rollRate) > 55.0f)
+    { fsHtStrobePh += dt * 5.0f; if (fsHtStrobePh >= 1.0f) fsHtStrobePh -= 1.0f; }
+
+  // Fire glitter: spawn on sharp blob velocity kick (jerk proxy)
+  float dvBlob = fbv - lastFbv; lastFbv = fbv;
+  if (mpu_ready && fabs(dvBlob) > 0.2f) {
+    float gDir = (dvBlob > 0.0f) ? 1.0f : -1.0f;
+    int count = min(3 + (int)(fabs(dvBlob) * 25.0f), 15);
+    for (int n = 0; n < count; n++) {
+      for (int p = 0; p < FS_FG_MAX; p++) {
+        if (fg[p].active) continue;
+        fg[p].pos    = clampf(fb + (random(20)-10)*0.004f, 0.05f, 0.95f);
+        fg[p].vel    = gDir * (0.4f + random(60)/100.0f);
+        fg[p].life   = 0.5f + random(50)/100.0f;
+        fg[p].active = true; break;
+      }
+    }
+  }
+  // Update glitter particles
+  for (int p = 0; p < FS_FG_MAX; p++) {
+    if (!fg[p].active) continue;
+    fg[p].pos  += fg[p].vel * dt;
+    fg[p].vel  *= (1.0f - dt * 2.0f);
+    fg[p].life -= dt * 1.8f;
+    if (fg[p].life <= 0.0f || fg[p].pos < 0.0f || fg[p].pos > 1.0f) fg[p].active = false;
+  }
+
+  // Heat simulation + render: rate-limited to 20 Hz
+  if (now - lu >= 50) {
+    lu = now;
+    if (random(100) < 3) for (int i=0;i<5;i++) if(!rA[i]){rA[i]=true;rPos[i]=0.5f;rT[i]=now;break;}
+    for (int i=0; i<STAFF_LENGTH; i++) { int cd=random(10,25); heat[i]=(heat[i]>cd)?heat[i]-cd:0; }
+    for (int k=STAFF_LENGTH-1; k>=2; k--) heat[k]=(byte)((heat[k-1]*0.6f+heat[k-2]*0.4f));
+    int bi=(int)(fb*STAFF_LENGTH); int bri=8+(int)(fabs(fbv)*15);
+    for (int i=-bri; i<=bri; i++) { int idx=bi+i; if(idx>=0&&idx<STAFF_LENGTH){float d=fabs(i)/(float)bri;int nh=heat[idx]+(int)((1-d)*200);heat[idx]=(nh>255)?255:(byte)nh;} }
+    // Background heat render: slow hue drift through deep reds + gentle brightness wave
+    float bgH = sin(bgDriftPhase) * 6.0f + 5.0f;          // hue 0–11, red↔dark-orange-red
+    float bgV = sin(bgDriftPhase * 1.7f) * 0.10f + 0.90f; // ±10% brightness swell
+    for (int i=0; i<STAFF_LENGTH; i++) {
+      byte t = heat[i]; uint8_t hue, sat, val;
+      if (t > 200)      { hue=(uint8_t)(bgH+12); sat=160; val=(uint8_t)(255*bgV); }
+      else if (t > 150) { hue=(uint8_t)(bgH+7);  sat=215; val=(uint8_t)((160+random(40))*bgV); }
+      else if (t > 100) { hue=(uint8_t)(bgH+3);  sat=240; val=(uint8_t)((110+random(40))*bgV); }
+      else if (t > 50)  { hue=(uint8_t)(bgH);    sat=255; val=(uint8_t)((55+random(35))*bgV); }
+      else              { hue=0;                  sat=255; val=(uint8_t)((20+random(20))*bgV); }
+      leds[HEAD_LENGTH+i] = CHSV(hue, sat, val);
+    }
+    for (int r=0; r<5; r++) {
+      if (!rA[r]) continue;
+      float rr = (now-rT[r])/800.0f*0.5f;
+      if (rr > 0.5f) { rA[r]=false; continue; }
+      for (int i=0; i<STAFF_LENGTH; i++) {
+        float pos=(float)i/STAFF_LENGTH, dc=fabs(pos-rPos[r]), dr2=fabs(dc-rr);
+        if (dr2 < 0.05f) { float ints=(1-dr2/0.05f)*(1-rr*2); leds[HEAD_LENGTH+i]+=CRGB((uint8_t)(ints*255),(uint8_t)(ints*100),0); }
+      }
+    }
+  }
+
+  // Center blob — every frame, additive, grows with roll speed
+  {
+    int ci = STAFF_LENGTH / 2;
+    float rollAbs = mpu_ready ? fabs(rollRate) : 0.0f;
+    float blobR = 6.0f + clampf(rollAbs / 5.0f, 0.0f, 45.0f);
+    float blobB = 150.0f + clampf((rollAbs - 55.0f) / 1.5f, 0.0f, 105.0f);
+    for (int i = 0; i < STAFF_LENGTH; i++) {
+      float d = fabs((float)(i - ci));
+      if (d < blobR) {
+        float f = 1.0f - d / blobR; f *= f;
+        leds[HEAD_LENGTH + i] += CHSV((uint8_t)(15 + (1.0f-f)*12), 240, (uint8_t)(blobB * f));
+      }
+    }
+  }
+
+  // Glitter render — every frame, additive
+  for (int p = 0; p < FS_FG_MAX; p++) {
+    if (!fg[p].active) continue;
+    int idx = (int)(fg[p].pos * (STAFF_LENGTH - 1));
+    if (idx < 0 || idx >= STAFF_LENGTH) continue;
+    float l = fg[p].life;
+    uint8_t h = (uint8_t)(5 + (1.0f - l) * 20);
+    uint8_t v = (uint8_t)(l * l * 240);
+    leds[HEAD_LENGTH + idx] += CHSV(h, 255, v);
+    if (idx > 0)               leds[HEAD_LENGTH + idx - 1] += CHSV(h, 230, v/3);
+    if (idx < STAFF_LENGTH-1)  leds[HEAD_LENGTH + idx + 1] += CHSV(h, 230, v/3);
+  }
+
+  // Blob strobe — 10 Hz sharp flash only at the moving blob position
+  {
+    float pulse = (blobStrobePh < 0.35f) ? (blobStrobePh / 0.35f) : 0.0f;  // brief on-spike, dark the rest
+    pulse = pulse * pulse * pulse;  // snappy burst shape
+    if (pulse > 0.01f) {
+      int bi2 = (int)(fb * (STAFF_LENGTH - 1));
+      int bw  = 7 + (int)(fabs(fbv) * 10);
+      for (int i = -bw; i <= bw; i++) {
+        int idx = bi2 + i;
+        if (idx < 0 || idx >= STAFF_LENGTH) continue;
+        float d = fabs((float)i) / (float)bw;
+        float f = (1.0f - d*d) * pulse;
+        leds[HEAD_LENGTH + idx] += CHSV(10, 180, (uint8_t)(f * 220));
+      }
+    }
+  }
+
+  finishEffect(dt, fb, fbv, 0, 255, 220, 10, 255, 200);
+
+  // Roll rings — slowed down (0.3f)
+  if (mpu_ready && fabs(rollRate) > 55.0f) {
+    float str = clampf((fabs(rollRate)-55.0f)/145.0f, 0.0f, 1.0f);
+    int ci = STAFF_LENGTH/2;
+    for (int r = 0; r < 2; r++) {
+      float ring = fmod(vortexPhase*0.3f + r*0.5f, 1.0f) * (float)(STAFF_LENGTH/2);
+      for (int i = 0; i < STAFF_LENGTH; i++) {
+        float d = fabs(fabs((float)i-ci) - ring);
+        if (d < 5.0f) { float f=(1.0f-d/5.0f)*str; leds[HEAD_LENGTH+i]+=CHSV(random(25),255,(uint8_t)(f*220)); }
+      }
+    }
+    // Head and tail: ~0.2 s red/orange strobe (5 Hz)
+    CRGB htsc = (fsHtStrobePh < 0.5f) ? CRGB(CHSV(0, 255, 255)) : CRGB(CHSV(18, 255, 240));
+    uint8_t ba = (uint8_t)(str * 210);
+    for (int i = 0; i < HEAD_LENGTH; i++)
+      leds[i] = blend(leds[i], htsc, ba);
+    for (int hi = 0; hi < HEAD_LENGTH; hi++) {
+      int t1 = TAIL_START + TAIL_OFFSET + hi*2;
+      int t2 = t1 + 1;
+      if (t1 < NUM_LEDS) leds[t1] = blend(leds[t1], htsc, ba);
+      if (t2 < NUM_LEDS) leds[t2] = blend(leds[t2], htsc, ba);
+    }
+  }
+  applyRollGlow(5, 255);
 }
 void renderOceanWavesEffect(float dt) {
   static float wp=0,ob=0.5f,obv=0;
@@ -244,8 +403,10 @@ void renderOceanWavesEffect(float dt) {
   static unsigned long wgT[3]={0};
   uint32_t now=millis();
   if(mpu_ready){
-    float ty=clampf(accel[1]*0.4f,-1,1);
-    obv=obv*0.9f+ty*dt*6; ob+=obv*dt*2;
+    static float lastAccelYOW=0.0f;
+    float ty=clampf(accel[1]*0.8f,-1.2f,1.2f);
+    float jk=clampf((ty-lastAccelYOW)*5.0f,-3.0f,3.0f); lastAccelYOW=ty;
+    obv=obv*0.88f+(ty*1.2f+jk*1.0f)*dt*7; ob+=obv*dt*2;
     if(ob<0.1f){ob=0.1f;obv=-obv*0.8f;htState.headImpactIntensity=1.2f;wgP[0]=0;wgS[0]=0.1f;wgI[0]=1.0f;wgT[0]=now;}
     if(ob>0.9f){ob=0.9f;obv=-obv*0.8f;htState.tailImpactIntensity=1.2f;wgP[2]=1;wgS[2]=0.1f;wgI[2]=1.0f;wgT[2]=now;}
   } else { static float sp=0;sp+=dt*0.4f;ob=0.5f+sin(sp)*0.25f;obv=cos(sp)*0.15f; }
@@ -277,40 +438,165 @@ void renderOceanWavesEffect(float dt) {
   }
   if(fabs(obv)>0.2f&&random8()<50) leds[HEAD_LENGTH+random(STAFF_LENGTH)]=CHSV(180,200,220);
   finishEffect(dt,ob,obv, 160,220,200, 170,220,180);
-}
-void renderCrystalPulseEffect(float dt) {
-  static float cp=0,cb=0.5f,cbv=0;
-  static float eP[6]={0},eS[6]={0},eI[6]={0};
-  static uint8_t eH[6]={0};
-  static unsigned long eT[6]={0};
-  uint32_t now=millis();
-  if(mpu_ready){
-    float ty=clampf(accel[1]*0.3f,-1,1);
-    cbv=cbv*0.92f+ty*dt*5; cb+=cbv*dt*1.8f;
-    if(cb<0.1f){cb=0.1f;cbv=-cbv*0.75f;htState.headImpactIntensity=1.3f;for(int e=0;e<6;e++)if(eI[e]<0.2f){eP[e]=0.1f;eS[e]=0;eI[e]=1.0f;eH[e]=200+random(60);eT[e]=now;break;}}
-    if(cb>0.9f){cb=0.9f;cbv=-cbv*0.75f;htState.tailImpactIntensity=1.3f;for(int e=0;e<6;e++)if(eI[e]<0.2f){eP[e]=0.9f;eS[e]=0;eI[e]=1.0f;eH[e]=200+random(60);eT[e]=now;break;}}
-  } else { static float sp=0;sp+=dt*0.6f;cb=0.5f+sin(sp)*0.2f;cbv=cos(sp)*0.12f; }
-  if(random(100)<5)for(int e=0;e<6;e++)if(eI[e]<0.2f){eP[e]=0.2f+random(60)/100.0f;eS[e]=0;eI[e]=0.7f+random(30)/100.0f;eH[e]=190+random(70);eT[e]=now;break;}
-  for(int e=0;e<6;e++)if(eI[e]>0.1f){float as=(now-eT[e])/1000.0f;eS[e]=0.05f+(sin(as*4)*0.5f+0.5f)*0.25f;eI[e]*=0.96f;if(as>1.5f||eI[e]<0.1f)eI[e]=0;}
-  cp+=dt*3; if(cp>6.283f)cp-=6.283f;
-  for(int i=0;i<STAFF_LENGTH;i++){
-    float pos=(float)i/STAFF_LENGTH,sh=sin(pos*20+cp)*0.3f+0.7f;
-    leds[HEAD_LENGTH+i]=CHSV(200+(uint8_t)(pos*40),220,20+(uint8_t)(sh*30));
-  }
-  for(int e=0;e<6;e++){
-    if(eI[e]<0.1f)continue;
-    for(int i=0;i<STAFF_LENGTH;i++){
-      float pos=(float)i/STAFF_LENGTH,de=fabs(pos-eP[e]);
-      if(de<eS[e]){float ints=(eS[e]-de)/eS[e];ints*=ints;ints*=eI[e];
-        leds[HEAD_LENGTH+i]+=CHSV(eH[e]+(uint8_t)(ints*20),255-(uint8_t)(ints*100),(uint8_t)(ints*255));}
+  if (mpu_ready && fabs(rollRate) > 55.0f) {
+    // Wave sweep: whitecap surge rolls from one end to the other at spin speed
+    float str = clampf((fabs(rollRate)-55.0f)/145.0f, 0.0f, 1.0f);
+    float sweep = fmod(fabs(vortexPhase)*1.8f, (float)STAFF_LENGTH);
+    if (rollRate < 0) sweep = STAFF_LENGTH-1-sweep;
+    for (int i = 0; i < STAFF_LENGTH; i++) {
+      float d = fabs((float)i - sweep);
+      if (d < 14.0f) { float f=(1.0f-d/14.0f)*str; f*=f; leds[HEAD_LENGTH+i]+=CHSV(170,(uint8_t)(120-f*110),(uint8_t)(f*230)); }
     }
   }
-  for(int i=0;i<STAFF_LENGTH;i++){
-    float pos=(float)i/STAFF_LENGTH,dc=fabs(pos-cb);
-    if(dc<0.15f){float bi=(0.15f-dc)/0.15f;bi*=bi;
-      leds[HEAD_LENGTH+i]+=CHSV(210+(uint8_t)(bi*30),200,(uint8_t)(bi*200));}
+  applyRollGlow(165, 170);   // seafoam white surge when spinning
+}
+void renderForestFairiesEffect(float dt) {
+  #define FF_N 4
+  #define FF_TR 100
+  struct FFairy { float pos, vel, hue, size, phase, wander; };
+  struct FFTrail { float pos, vel, life; bool active; };
+  static FFairy  ff[FF_N];
+  static FFTrail ft[FF_TR];
+  static bool    ffInit       = false;
+  static float   bgPhase      = 0.0f;
+  static float   lastAccelYFF = 0.0f;
+  static float   ffStrobePh   = 0.0f;  // 10 Hz strobe — alternates which particles are visible
+
+  if (!ffInit) {
+    const float hues[FF_N]  = {88.0f, 96.0f, 78.0f, 105.0f};
+    const float sizes[FF_N] = {0.04f, 0.045f, 0.035f, 0.04f};
+    for (int f = 0; f < FF_N; f++) {
+      ff[f].pos    = 0.15f + f * (0.70f / (FF_N - 1));  // spread evenly 0.15-0.85
+      ff[f].vel    = 0.0f;
+      ff[f].hue    = hues[f];  ff[f].size  = sizes[f];
+      ff[f].phase  = f * 1.57f; ff[f].wander = f * 1.1f;
+    }
+    memset(ft, 0, sizeof(ft));
+    ffInit = true;
   }
-  finishEffect(dt,cb,cbv, 210,220,220, 220,200,200);
+
+  bgPhase    += dt * 0.2f;  if (bgPhase    > 6.2832f) bgPhase    -= 6.2832f;
+  ffStrobePh += dt * 10.0f; if (ffStrobePh >= 1.0f)   ffStrobePh -= 1.0f;
+
+  // IMU — purple-blob style for fast response
+  float accelY = mpu_ready ? clampf(accel[1]*0.8f, -1.2f, 1.2f) : 0.0f;
+  float jerkFF = mpu_ready ? clampf((accelY - lastAccelYFF)*5.0f, -3.0f, 3.0f) : 0.0f;
+  lastAccelYFF = accelY;
+
+  // Jerk burst — spawn a volley of sparkles shooting to both ends from every fairy
+  if (mpu_ready && fabs(jerkFF) > 1.2f) {
+    int spawnN = 1 + (int)(fabs(jerkFF) * 1.5f);
+    for (int f = 0; f < FF_N; f++) {
+      for (int dir = -1; dir <= 1; dir += 2) {
+        for (int n = 0; n < spawnN; n++) {
+          for (int t = 0; t < FF_TR; t++) {
+            if (ft[t].active) continue;
+            ft[t].pos    = ff[f].pos + (random(14)-7) * 0.003f;
+            ft[t].vel    = dir * (0.5f + random(55)/100.0f);
+            ft[t].life   = 1.1f + random(40)/100.0f;   // longer-lived burst particles
+            ft[t].active = true;
+            break;
+          }
+        }
+      }
+    }
+    htState.headImpactIntensity = max(htState.headImpactIntensity, fabs(jerkFF)*0.7f);
+    htState.tailImpactIntensity = max(htState.tailImpactIntensity, fabs(jerkFF)*0.7f);
+  }
+
+  // Update fairies — IMU dominant, wander is a tiny nudge for spread only
+  for (int f = 0; f < FF_N; f++) {
+    ff[f].wander += dt * (0.35f + f * 0.18f); if (ff[f].wander > 6.2832f) ff[f].wander -= 6.2832f;
+    ff[f].phase  += dt * (3.0f  + f * 0.5f);  if (ff[f].phase  > 6.2832f) ff[f].phase  -= 6.2832f;
+
+    float imuForce    = mpu_ready ? (accelY * 1.8f + jerkFF * 1.5f) * dt * 9.0f : 0.0f;
+    float wanderNudge = sin(ff[f].wander) * (mpu_ready ? 0.03f : 0.08f);  // subtle spread
+    ff[f].vel  = ff[f].vel * 0.88f + imuForce + wanderNudge;
+    ff[f].pos += ff[f].vel * dt * 2.5f;
+
+    if (ff[f].pos < 0.05f) { ff[f].pos = 0.05f; ff[f].vel =  fabs(ff[f].vel) * 0.6f; }
+    if (ff[f].pos > 0.95f) { ff[f].pos = 0.95f; ff[f].vel = -fabs(ff[f].vel) * 0.6f; }
+
+    // Continuous outward trail stream in both directions
+    for (int dir = -1; dir <= 1; dir += 2) {
+      if (random(100) < 5) {
+        for (int t = 0; t < FF_TR; t++) {
+          if (ft[t].active) continue;
+          ft[t].pos    = ff[f].pos + (random(8)-4) * 0.003f;
+          ft[t].vel    = dir * (0.42f + random(40)/100.0f);  // 0.42-0.82 units/sec outward
+          ft[t].life   = 0.75f + random(40)/100.0f;
+          ft[t].active = true;
+          break;
+        }
+      }
+    }
+  }
+
+  // Update trail particles — simple decay, no artificial edge kill
+  for (int t = 0; t < FF_TR; t++) {
+    if (!ft[t].active) continue;
+    ft[t].pos  += ft[t].vel * dt;
+    ft[t].life -= dt * 0.85f;   // slow decay — lets them reach the ends
+    if (ft[t].life <= 0.0f || ft[t].pos <= 0.0f || ft[t].pos >= 1.0f) ft[t].active = false;
+  }
+
+  // Background: dark forest floor
+  for (int i = 0; i < STAFF_LENGTH; i++) {
+    float p = (float)i / STAFF_LENGTH;
+    float b = sin(p * 6.0f + bgPhase) * 0.28f + sin(p * 2.2f - bgPhase * 0.55f) * 0.30f + 0.45f;
+    if (b < 0.0f) b = 0.0f; if (b > 1.0f) b = 1.0f;
+    leds[HEAD_LENGTH + i] = CHSV((uint8_t)(88 + b * 10), 245, (uint8_t)(b * 30 + 5));
+  }
+
+  // Trail particles — alternating strobe: even-indexed on first half-cycle, odd on second
+  bool strobeA = (ffStrobePh < 0.5f);
+  for (int t = 0; t < FF_TR; t++) {
+    if (!ft[t].active) continue;
+    // Every other particle is dark on this half-cycle — creates the sparkling alternation
+    if ((t % 2 == 0) != strobeA) continue;
+    int idx = (int)(ft[t].pos * (STAFF_LENGTH - 1));
+    if (idx < 0 || idx >= STAFF_LENGTH) continue;
+    float l = ft[t].life;
+    // Quadratic fizzle starts 30% from each end — clear dissipation visible at the tips
+    float edgeDist = ft[t].pos < 0.5f ? ft[t].pos : (1.0f - ft[t].pos);
+    float ef = edgeDist / 0.30f; if (ef > 1.0f) ef = 1.0f; ef = ef * ef;
+    float bri = l * ef;
+    if (bri > 1.0f) bri = 1.0f;
+    uint8_t v = (uint8_t)(bri * 175);
+    CRGB sc = CRGB(v, (uint8_t)(v*18/20), (uint8_t)(v*10/16));
+    leds[HEAD_LENGTH + idx] = blend(leds[HEAD_LENGTH + idx], sc, v);
+  }
+
+  // Fairy blobs — small, distinct green dots
+  for (int f = 0; f < FF_N; f++) {
+    int     fi      = (int)(ff[f].pos * (STAFF_LENGTH - 1));
+    int     srad    = max(1, (int)(ff[f].size * STAFF_LENGTH));
+    float   flicker = sin(ff[f].phase) * 0.15f + 0.85f;
+    uint8_t hue     = (uint8_t)ff[f].hue;
+    for (int w = -srad; w <= srad; w++) {
+      int idx = fi + w;
+      if (idx < 0 || idx >= STAFF_LENGTH) continue;
+      float d   = fabs((float)w) / (float)(srad + 1);
+      float fac = (1.0f - d*d) * flicker;
+      leds[HEAD_LENGTH + idx] += CHSV(hue, (uint8_t)(255 - fac*50), (uint8_t)(fac * 165));
+    }
+  }
+
+  finishEffect(dt, 0.5f, 0.0f, 96, 255, 200, 96, 255, 200);
+
+  // Roll: sweeping green shimmer rings
+  if (mpu_ready && fabs(rollRate) > 55.0f) {
+    float str = clampf((fabs(rollRate)-55.0f)/145.0f, 0.0f, 1.0f);
+    int ci = STAFF_LENGTH/2;
+    for (int r = 0; r < 2; r++) {
+      float ring = fmod(vortexPhase*0.4f + r*0.5f, 1.0f) * (float)(STAFF_LENGTH/2);
+      for (int i = 0; i < STAFF_LENGTH; i++) {
+        float d = fabs(fabs((float)i-ci) - ring);
+        if (d < 5.0f) { float fac=(1.0f-d/5.0f)*str; leds[HEAD_LENGTH+i]+=CHSV(96+random(20),200,(uint8_t)(fac*210)); }
+      }
+    }
+  }
+  applyRollGlow(96, 200);
 }
 void renderPingPongEffect(float dt) {
   #define MAX_BALLS 12
@@ -322,7 +608,17 @@ void renderPingPongEffect(float dt) {
   float sm=globalSpeed/128.0f;
   if(!init){for(int b=0;b<MAX_BALLS;b++){balls[b].active=false;balls[b].bounces=0;for(int t=0;t<10;t++)balls[b].trail[t]=-1;}init=true;}
   float tf=mpu_ready?clampf(accel[1]*1.5f,-3,3):0;
-  spawnTimer+=dt;
+  static float lastAccelYPP=0.0f;
+  float ty = mpu_ready ? accel[1] : 0.0f;
+  float jerkPP = mpu_ready ? clampf((ty-lastAccelYPP)*5.0f,-3.0f,3.0f) : 0.0f;
+  lastAccelYPP = ty;
+  if (fabs(jerkPP) > 1.5f) {
+    spawnTimer += dt * 10.0f * fabs(jerkPP);
+    htState.headImpactIntensity = max(htState.headImpactIntensity, fabs(jerkPP)*0.6f);
+    htState.tailImpactIntensity = max(htState.tailImpactIntensity, fabs(jerkPP)*0.6f);
+  } else {
+    spawnTimer+=dt;
+  }
   int ac=0; for(int b=0;b<MAX_BALLS;b++) if(balls[b].active)ac++;
   float si=(ac==0)?0.05f:0.4f;
   if(spawnTimer>=si&&ac<MAX_BALLS){
@@ -370,4 +666,18 @@ void renderPingPongEffect(float dt) {
   if(!customColorMode){float hp=sin(now*0.002f)*0.3f+0.7f,tp=sin(now*0.002f+1.5f)*0.3f+0.7f;headHue=180;headSat=200;headVal=(uint8_t)(150+hp*80);tailHue=200;tailSat=200;tailVal=(uint8_t)(130+tp*80);}
   updateHeadTailReactivity(dt,0.5f,tf*0.1f);
   renderHeadAndTail();
+  if (mpu_ready && fabs(rollRate) > 55.0f) {
+    float str = clampf((fabs(rollRate)-55.0f)/145.0f, 0.0f, 1.0f);
+    for (int b=0; b<MAX_BALLS; b++) {
+      if (!balls[b].active) continue;
+      int bi = HEAD_LENGTH + (int)(balls[b].pos*(STAFF_LENGTH-1));
+      for (int i=-5; i<=5; i++) {
+        int idx = bi+i;
+        if (idx>=HEAD_LENGTH && idx<HEAD_LENGTH+STAFF_LENGTH) {
+          float d = fabs((float)i)/5.0f;
+          leds[idx] += CHSV(balls[b].hue, 200, (uint8_t)((1.0f-d)*str*150.0f));
+        }
+      }
+    }
+  }
 }

@@ -28,14 +28,13 @@
 
 // ─── PIN CONFIGURATION ────────────────────────────────────────────────
 #define LED_PIN       D7
-#define ACCENT_PIN    D2
 #define BUTTON_PIN    D3
 #define SDA_PIN       D4
 #define SCL_PIN       D5
 
 // ─── LED CONFIGURATION ────────────────────────────────────────────────
-#define NUM_LEDS      86
-#define BLADE_HALF    43      // logical positions: 0=hilt, 42=tip
+#define NUM_LEDS      114
+#define BLADE_LENGTH  110     // single stripped blade (no mirror)
 #define BRIGHTNESS    180
 #define OTA_BRIGHTNESS 60
 
@@ -45,7 +44,7 @@
 // ─── WIFI / OTA ───────────────────────────────────────────────────────
 const char* ssid      = "CGN3-4400";
 const char* password  = "251148015432";
-const char* hostname  = "PurpleSword";
+const char* hostname  = "Fullsword";
 const char* otaHash   = "f3b462d93b24cb0538f5d864546bc3e0"; // MD5 hash of "sword"
 WebServer   server(80);
 
@@ -62,12 +61,10 @@ float twistRate= 0.0f;   // filtered axial gyro gz (deg/s)
 float accelZ   = 0.0f;   // filtered accel along blade axis (g) — drives painter
 int8_t tiltDir =  1;     // +1 = tip-up → chase toward tip; -1 = tip-down
 
-// ─── ANIMATION STATE ──────────────────────────────────────────────────
-uint8_t  effectMode   = 0;     // 0=Chase  1=Pulse  2=Ripple
+// ─── EFFECTS STATE ────────────────────────────────────────────────────
+uint8_t  effectMode   = 0;     // Cycle: Painter, PingPong, FireStorm, OceanWaves, PlasmaStorm
 uint8_t  baseHue      = 190;   // purple-blue base (~190 in FastLED HSV)
 
-float    chasePos     = 0.0f;
-uint8_t  topMode      = 0;     // 0=Chase/Pulse/Ripple  1=Painter
 uint8_t  clickCount   = 0;     // button clicks waiting to be dispatched
 uint32_t lastClickMs  = 0;     // millis() of most recent press
 bool     lastButton   = HIGH;
@@ -81,28 +78,13 @@ uint32_t buttonDownMs = 0;     // millis() when button last went LOW
 #define  SYNC_MSG_PING   0x02    // ESP-NOW packet: presence beacon
 #define  SYNC_SEARCH_MS  60000   // discovery window: 60 seconds
 
-// ─── G-FORCE BLOB PHYSICS ─────────────────────────────────────────────
-// A bright violet blob is pushed toward the tip by swing force.
-// Spring pulls it back to hilt; slightly underdamped so it oscillates on return.
-// Rendered additively on top of whichever effect is active.
-//
-// Tuning knobs:
-//   GBLOB_SPRING — higher = snappier return, shorter oscillation (0.010–0.025)
-//   GBLOB_DAMP   — higher = less overshoot bounce on return  (0.88–0.96)
-//   GBLOB_FORCE  — push strength per deg/s above deadband    (0.003–0.008)
-//   GBLOB_KICK   — swing deadband: ignore below this deg/s
-// ──────────────────────────────────────────────────────────────────────
-#define GBLOB_SPRING  0.015f
-#define GBLOB_DAMP    0.93f
-#define GBLOB_FORCE   0.005f
-#define GBLOB_KICK    20.0f
-
-float gBlobPos = 0.0f;   // current position  0=hilt  BLADE_HALF-1=tip
-float gBlobVel = 0.0f;   // current velocity (blade units/frame)
+// ─── ROLLING OVERLAY PHYSICS ──────────────────────────────────────────
+float rollPhase = 0.0f;
+float lastGyroZ = 0.0f;
 
 // ─── SWORD PAINTER STATE ──────────────────────────────────────────────
 struct {
-  float buf[BLADE_HALF];  // per-pixel hue (0–255 float)
+  float buf[BLADE_LENGTH];  // per-pixel hue (0–255 float)
   float paintCenter;      // 0=hilt, 1=tip (normalised)
   float paintVelocity;
   float centerHue;
@@ -199,16 +181,32 @@ uint8_t broadcastAddr[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 // BLADE HELPERS
 // =====================================================================
 
-// Write colour to logical blade position pos (0=hilt, BLADE_HALF-1=tip)
-// on BOTH sides simultaneously — this is the only function that touches leds[].
+// Write colour to physical blade position pos (0=hilt, BLADE_LENGTH-1=tip)
 inline void bladeSet(int pos, CRGB color) {
-  if (pos < 0 || pos >= BLADE_HALF) return;
-  leds[pos]                  = color;
-  leds[NUM_LEDS - 1 - pos]   = color;
+  if (pos < 0 || pos >= BLADE_LENGTH) return;
+  leds[4 + pos] = color;
+}
+
+// Read colour from physical blade position pos (0=hilt, BLADE_LENGTH-1=tip)
+inline CRGB bladeGet(int pos) {
+  if (pos < 0 || pos >= BLADE_LENGTH) return CRGB::Black;
+  return leds[4 + pos];
 }
 
 void bladeClear() {
-  fill_solid(leds, NUM_LEDS, CRGB::Black);
+  fill_solid(leds + 4, NUM_LEDS - 4, CRGB::Black);
+}
+
+void renderAccents() {
+  // Slowly pulse the 4 accent LEDs at the base of the strip
+  float pulse = (sinf((float)millis() * 0.002f) + 1.0f) * 0.5f;
+  uint8_t bri = (uint8_t)(pulse * 150.0f + 50.0f);
+  CRGB accentColor = CHSV(baseHue + 20, 200, bri); // Slightly shifted hue
+  
+  leds[0] = accentColor;
+  leds[1] = accentColor;
+  leds[2] = accentColor;
+  leds[3] = accentColor;
 }
 
 
@@ -233,14 +231,14 @@ static int16_t imuRead16(uint8_t reg) {
 
 void setupIMU() {
   Wire.begin(SDA_PIN, SCL_PIN);
-  Wire.setClock(100000);   // 100 kHz — reliable for MPU6050 initial contact
-  delay(150);              // MPU6050 needs up to 100 ms after power-on
+  Wire.setClock(100000);   // 100 kHz
+  delay(150);              
 
   // ── Step 1: I2C presence check — does 0x68 ACK at all? ───────────
   Wire.beginTransmission(0x68);
   uint8_t err = Wire.endTransmission();
   if (err != 0) {
-    Serial.printf("MPU6050: no ACK at 0x68 (I2C error %u) — check SDA/SCL wiring\n", err);
+    Serial.printf("MPU9250: no ACK at 0x68 (I2C error %u) — check SDA/SCL wiring\n", err);
     Wire.beginTransmission(0x69);
     if (Wire.endTransmission() == 0)
       Serial.println("  → found something at 0x69 — is AD0 pin HIGH? Change IMU_ADDR to 0x69");
@@ -248,19 +246,19 @@ void setupIMU() {
     return;
   }
 
-  // ── Step 2: Read WHO_AM_I — MPU6050 must return 0x68 ─────────────
+  // ── Step 2: Read WHO_AM_I — MPU9250 returns 0x71 or 0x73 (or 0x70 for MPU6500) ─────────────
   Wire.beginTransmission(0x68);
   Wire.write(0x75);
   err = Wire.endTransmission(false);
   if (err != 0) {
-    Serial.printf("MPU6050: WHO_AM_I write failed (I2C error %u)\n", err);
+    Serial.printf("MPU9250: WHO_AM_I write failed (I2C error %u)\n", err);
     imuOk = false;
     return;
   }
   Wire.requestFrom((uint8_t)0x68, (uint8_t)1);
   uint8_t id = Wire.available() ? Wire.read() : 0xFF;
-  if (id != 0x68) {
-    Serial.printf("MPU6050: WHO_AM_I = 0x%02X, expected 0x68 — not an MPU6050\n", id);
+  if (id != 0x71 && id != 0x73 && id != 0x70 && id != 0x68) {
+    Serial.printf("MPU9250: WHO_AM_I = 0x%02X, expected 0x71/0x73 (MPU9250)\n", id);
     imuOk = false;
     return;
   }
@@ -284,7 +282,7 @@ void setupIMU() {
   Wire.endTransmission();
 
   imuOk = true;
-  Serial.println("MPU6050: found and configured at 0x68");
+  Serial.println("MPU9250: found and configured at 0x68");
 }
 
 void updateIMU() {
@@ -378,8 +376,8 @@ void effectPulse() {
 
   uint8_t hue = baseHue + (int8_t)(twistRate * 0.4f);
 
-  for (int i = 0; i < BLADE_HALF; i++) {
-    float t    = (float)i / (float)(BLADE_HALF - 1);
+  for (int i = 0; i < BLADE_LENGTH; i++) {
+    float t    = (float)i / (float)(BLADE_LENGTH - 1);
     float wave = sinf(t * TWO_PI * 1.5f + pulsePhase);
     uint8_t bri = (uint8_t)(((wave + 1.0f) * 0.5f) * 210.0f + 30.0f);
     uint8_t sat = (uint8_t)(180.0f + fabsf(wave) * 70.0f);
@@ -424,7 +422,7 @@ void effectRipple() {
 
     ripplePos[r] += rippleSpd[r] * (float)tiltDir;
 
-    if (ripplePos[r] >= BLADE_HALF || ripplePos[r] < 0.0f) {
+    if (ripplePos[r] >= BLADE_LENGTH || ripplePos[r] < 0.0f) {
       ripplePos[r] = -1.0f;
       continue;
     }
@@ -433,14 +431,12 @@ void effectRipple() {
     float frac = ripplePos[r] - p;
 
     // Sub-pixel rendering between p and p+1
-    if (p >= 0 && p < BLADE_HALF) {
-      leds[p]                  += CHSV(rippleHue[r], 235, (uint8_t)(220.0f * (1.0f - frac)));
-      leds[NUM_LEDS - 1 - p]   += CHSV(rippleHue[r], 235, (uint8_t)(220.0f * (1.0f - frac)));
+    if (p >= 0 && p < BLADE_LENGTH) {
+      bladeSet(p, bladeGet(p) + CHSV(rippleHue[r], 235, (uint8_t)(220.0f * (1.0f - frac))));
     }
     
-    if (p + 1 >= 0 && p + 1 < BLADE_HALF) {
-      leds[p + 1]              += CHSV(rippleHue[r], 235, (uint8_t)(220.0f * frac));
-      leds[NUM_LEDS - 2 - p]   += CHSV(rippleHue[r], 235, (uint8_t)(220.0f * frac));
+    if (p + 1 >= 0 && p + 1 < BLADE_LENGTH) {
+      bladeSet(p + 1, bladeGet(p + 1) + CHSV(rippleHue[r], 235, (uint8_t)(220.0f * frac)));
     }
   }
 }
@@ -460,8 +456,8 @@ void effectPainter() {
   const float dt = 0.016f;
 
   if (!pnt.ready) {
-    for (int i = 0; i < BLADE_HALF; i++)
-      pnt.buf[i] = (float)(i * 256) / BLADE_HALF;
+    for (int i = 0; i < BLADE_LENGTH; i++)
+      pnt.buf[i] = (float)(i * 256) / BLADE_LENGTH;
     pnt.paintCenter   = 0.5f;
     pnt.paintVelocity = 0.0f;
     pnt.centerHue     = (float)baseHue;
@@ -489,8 +485,8 @@ void effectPainter() {
   pnt.centerHue += dt * 80.0f;
   if (pnt.centerHue >= 256.0f) pnt.centerHue -= 256.0f;
 
-  int ci = constrain((int)(pnt.paintCenter * BLADE_HALF), 0, BLADE_HALF - 1);
-  int br = max(3, (int)((0.12f + fabsf(pnt.paintVelocity) * 0.15f) * BLADE_HALF));
+  int ci = constrain((int)(pnt.paintCenter * BLADE_LENGTH), 0, BLADE_LENGTH - 1);
+  int br = max(3, (int)((0.12f + fabsf(pnt.paintVelocity) * 0.15f) * BLADE_LENGTH));
 
   // ── Twist → shift hue bands sideways + capture dominant zone ─────────
   bool twisting = imuOk && fabsf(twistRate) > 30.0f;
@@ -498,7 +494,7 @@ void effectPainter() {
     if (pnt.domFade <= 0.0f) pnt.domHue = pnt.buf[ci];
     pnt.domFade    = 2.0f;
     pnt.domWidth   = constrain(pnt.domWidth + dt * fabsf(twistRate) * 0.05f,
-                               0.0f, (float)(BLADE_HALF / 2 - 2));
+                               0.0f, (float)(BLADE_LENGTH / 2 - 2));
     pnt.shiftAccum += twistRate * dt * 0.12f;
   } else {
     pnt.domFade    = constrain(pnt.domFade  - dt,      0.0f, 2.0f);
@@ -506,20 +502,20 @@ void effectPainter() {
     pnt.shiftAccum *= (1.0f - dt * 3.0f);
   }
   while (pnt.shiftAccum >= 1.0f) {
-    float sv = pnt.buf[BLADE_HALF - 1];
-    for (int i = BLADE_HALF - 1; i > 0; i--) pnt.buf[i] = pnt.buf[i - 1];
+    float sv = pnt.buf[BLADE_LENGTH - 1];
+    for (int i = BLADE_LENGTH - 1; i > 0; i--) pnt.buf[i] = pnt.buf[i - 1];
     pnt.buf[0] = sv;
     pnt.shiftAccum -= 1.0f;
   }
   while (pnt.shiftAccum <= -1.0f) {
     float sv = pnt.buf[0];
-    for (int i = 0; i < BLADE_HALF - 1; i++) pnt.buf[i] = pnt.buf[i + 1];
-    pnt.buf[BLADE_HALF - 1] = sv;
+    for (int i = 0; i < BLADE_LENGTH - 1; i++) pnt.buf[i] = pnt.buf[i + 1];
+    pnt.buf[BLADE_LENGTH - 1] = sv;
     pnt.shiftAccum += 1.0f;
   }
 
   // ── Paint: blend pixels near brush toward centerHue ───────────────────
-  for (int i = 0; i < BLADE_HALF; i++) {
+  for (int i = 0; i < BLADE_LENGTH; i++) {
     int d = abs(i - ci);
     if (d > br) continue;
     float ms = 1.0f - (float)d / (br + 1); ms = ms * ms * ms;
@@ -532,10 +528,10 @@ void effectPainter() {
   }
 
   // ── Diffusion: gentle hue spread to neighbours ────────────────────────
-  static float tb[BLADE_HALF];
+  static float tb[BLADE_LENGTH];
   memcpy(tb, pnt.buf, sizeof(tb));
   float diffR = 0.03f * dt;
-  for (int i = 1; i < BLADE_HALF - 1; i++) {
+  for (int i = 1; i < BLADE_LENGTH - 1; i++) {
     float ld = tb[i-1] - tb[i], rd = tb[i+1] - tb[i];
     if (ld >  128.0f) ld -= 256.0f; if (ld < -128.0f) ld += 256.0f;
     if (rd >  128.0f) rd -= 256.0f; if (rd < -128.0f) rd += 256.0f;
@@ -548,7 +544,7 @@ void effectPainter() {
   if (pnt.domFade > 0.0f && pnt.domWidth > 0.5f) {
     float str = constrain(pnt.domFade / 2.0f, 0.0f, 1.0f);
     int dw    = (int)(pnt.domWidth + 0.5f);
-    for (int i = max(0, ci - dw); i <= min(BLADE_HALF - 1, ci + dw); i++) {
+    for (int i = max(0, ci - dw); i <= min(BLADE_LENGTH - 1, ci + dw); i++) {
       float dist = fabsf((float)(i - ci)) / (float)(dw + 1);
       float inf  = (1.0f - dist * dist) * str * 0.5f;
       float hd   = pnt.domHue - pnt.buf[i];
@@ -587,16 +583,17 @@ void effectPainter() {
     compPower = 1.0f / (1.0f - pntCompressPos * 2.0f + (boostMode ? 0.6f : 0.0f));
   }
 
-  for (int i = 0; i < BLADE_HALF; i++) {
+  for (int i = 0; i < BLADE_LENGTH; i++) {
     // Compressed sample index via power curve
-    float t    = (float)i / (float)(BLADE_HALF - 1);
-    float fidx = (i == 0) ? 0.0f : powf(t, compPower) * (float)(BLADE_HALF - 1);
+    float t    = (float)i / (float)(BLADE_LENGTH - 1);
+    float fidx = (i == 0) ? 0.0f : powf(t, compPower) * (float)(BLADE_LENGTH - 1);
     int   lo   = (int)fidx;
-    int   hix  = min(lo + 1, BLADE_HALF - 1);
+    int   hix  = min(lo + 1, BLADE_LENGTH - 1);
     float ifrc = fidx - lo;
 
     // Shortest-path hue interpolation (wraps at 0/256 boundary)
-    float h0 = pnt.buf[lo], h1 = pnt.buf[hix];
+    float h0 = pnt.buf[lo];
+    float h1 = pnt.buf[hix];
     float hd = h1 - h0;
     if (hd >  128.0f) hd -= 256.0f;
     if (hd < -128.0f) hd += 256.0f;
@@ -638,18 +635,15 @@ void effectPainter() {
   if (fabsf(pnt.paintVelocity) > 0.2f && random8() < 70) {
     int dd = (pnt.paintVelocity > 0) ? -1 : 1;
     int di = ci + dd * (br + (int)random(3));
-    if (di >= 0 && di < BLADE_HALF) {
+    if (di >= 0 && di < BLADE_LENGTH) {
       float dh = pnt.centerHue + (float)random(-20, 21);
       while (dh >= 256.0f) dh -= 256.0f;
       while (dh <    0.0f) dh += 256.0f;
       CRGB drp = CHSV((uint8_t)dh, 255, 200);
-      leds[di]                 = blend(leds[di],                 drp, 180);
-      leds[NUM_LEDS - 1 - di]  = blend(leds[NUM_LEDS - 1 - di],  drp, 180);
-      if (di > 0 && di < BLADE_HALF - 1) {
-        leds[di - 1]             = blend(leds[di - 1],             drp, 120);
-        leds[NUM_LEDS - di]      = blend(leds[NUM_LEDS - di],      drp, 120);
-        leds[di + 1]             = blend(leds[di + 1],             drp, 120);
-        leds[NUM_LEDS - 2 - di]  = blend(leds[NUM_LEDS - 2 - di],  drp, 120);
+      bladeSet(di, blend(bladeGet(di), drp, 180));
+      if (di > 0 && di < BLADE_LENGTH - 1) {
+        bladeSet(di - 1, blend(bladeGet(di - 1), drp, 120));
+        bladeSet(di + 1, blend(bladeGet(di + 1), drp, 120));
       }
     }
   }
@@ -678,7 +672,7 @@ static void spawnExplosion(BallState& a, BallState& b) {
 
 void initBalls() {
   for (int b = 0; b < NUM_BALLS; b++) {
-    balls[b].pos   = (float)(b + 1) * ((float)BLADE_HALF / (NUM_BALLS + 1.0f));
+    balls[b].pos   = (float)(b + 1) * ((float)BLADE_LENGTH / (NUM_BALLS + 1.0f));
     balls[b].vel   = 0.0f;
     balls[b].hue   = 0;
     balls[b].sat   = 0;
@@ -689,7 +683,7 @@ void initBalls() {
   ballsReady = true;
 }
 
-void effectBalls() {
+void effectPingPong() {
   if (!ballsReady) initBalls();
 
   // ── Whirlwind: accumulate twist → animated hue wave ──────────────────
@@ -701,7 +695,7 @@ void effectBalls() {
 
   // ── Background: constant red and blue animation ───────────────────────
   uint32_t ms = millis();
-  for (int i = 0; i < BLADE_HALF; i++) {
+  for (int i = 0; i < BLADE_LENGTH; i++) {
     float wave = (sinf((float)i * 0.15f + (float)ms * 0.003f) + 1.0f) * 0.5f;
     // wave = 0 -> Red, wave = 1 -> Blue. Peak brightness 150.
     uint8_t r = (uint8_t)((1.0f - wave) * 150.0f);
@@ -731,8 +725,8 @@ void effectBalls() {
     balls[b].pos += balls[b].vel;
 
     // Wall bounce at tip
-    if (balls[b].pos >= (float)(BLADE_HALF - 1)) {
-      balls[b].pos = (float)(BLADE_HALF - 1);
+    if (balls[b].pos >= (float)(BLADE_LENGTH - 1)) {
+      balls[b].pos = (float)(BLADE_LENGTH - 1);
       balls[b].vel = -fabsf(balls[b].vel) * 0.70f;
       if (boostMode) { balls[b].flash = fmaxf(balls[b].flash, 0.5f); balls[b].sat = 180; }
     }
@@ -779,7 +773,7 @@ void effectBalls() {
 
   // ── Render balls (Gaussian glow, additive) ───────────────────────────
   for (int b = 0; b < NUM_BALLS; b++) {
-    float   bpos   = constrain(balls[b].pos, 0.0f, (float)(BLADE_HALF - 1));
+    float   bpos   = constrain(balls[b].pos, 0.0f, (float)(BLADE_LENGTH - 1));
     int     centre = (int)bpos;
     float   frac   = bpos - centre;
     int     radius = balls[b].width + 2;
@@ -793,13 +787,12 @@ void effectBalls() {
 
     for (int d = -radius; d <= radius; d++) {
       int pos = centre + d;
-      if (pos < 0 || pos >= BLADE_HALF) continue;
+      if (pos < 0 || pos >= BLADE_LENGTH) continue;
       float   dist    = fabsf((float)d + frac);
       float   falloff = expf(-0.5f * (dist / sigma) * (dist / sigma));
       uint8_t bri     = (uint8_t)((float)baseBri * falloff);
       if (bri < 4) continue;
-      leds[pos]                += CHSV(bHue, bSat, bri);
-      leds[NUM_LEDS - 1 - pos] += CHSV(bHue, bSat, bri);
+      bladeSet(pos, bladeGet(pos) + CHSV(bHue, bSat, bri));
     }
 
     // Explosion ring expands outward from collision point
@@ -807,10 +800,9 @@ void effectBalls() {
       int ring = (int)(balls[b].flash * 7.0f);
       for (int side = -1; side <= 1; side += 2) {
         int pos = centre + side * ring;
-        if (pos >= 0 && pos < BLADE_HALF) {
+        if (pos >= 0 && pos < BLADE_LENGTH) {
           uint8_t rbri = (uint8_t)(balls[b].flash * 200.0f);
-          leds[pos]                += CHSV(balls[b].hue + 128, 200, rbri);
-          leds[NUM_LEDS - 1 - pos] += CHSV(balls[b].hue + 128, 200, rbri);
+          bladeSet(pos, bladeGet(pos) + CHSV(balls[b].hue + 128, 200, rbri));
         }
       }
     }
@@ -820,77 +812,226 @@ void effectBalls() {
   if (boostMode) {
     int sc = constrain(2 + (int)(swingMag * 0.04f), 2, 7);
     for (int s = 0; s < sc; s++) {
-      int pos = random(BLADE_HALF);
-      leds[pos]                += CHSV(random8(), random8(80, 220), random8(100, 230));
-      leds[NUM_LEDS - 1 - pos] += CHSV(random8(), random8(80, 220), random8(100, 230));
+      int pos = random(BLADE_LENGTH);
+      bladeSet(pos, bladeGet(pos) + CHSV(random8(), random8(80, 220), random8(100, 230)));
     }
   }
 }
 
-
 // =====================================================================
-// G-FORCE BLOB — physics update + render
-// Called every frame AFTER the chosen effect, so it layers on top.
+// EFFECT 3 — FIRE STORM
 // =====================================================================
+void effectFireStorm() {
+  const float dt = 0.016f;
+  static byte heat[114];
+  static uint32_t lu = 0;
+  static float fb = 0, fbv = 0;
+  static float rPos[5] = {0}; 
+  static unsigned long rT[5] = {0}; 
+  static bool rA[5] = {false};
+  
+  uint32_t now = millis();
+  if (now - lu < 50) return; 
+  lu = now;
 
-void updateBlobPhysics() {
-  // Push force toward tip — scaled swing above deadband
-  float push   = fmaxf(0.0f, swingMag - GBLOB_KICK) * GBLOB_FORCE * (boostMode ? 2.2f : 1.0f);
-  push        += stabImpulse * 5.0f;   // stab gives instant tip kick
-  push        -= pullImpulse * 5.0f;   // pull brings it back sharply
-
-  // Spring force back toward hilt (rest position = 0)
-  float spring = -GBLOB_SPRING * gBlobPos;
-
-  // Integrate: apply damping then acceleration
-  gBlobVel = gBlobVel * GBLOB_DAMP + push + spring;
-  gBlobPos += gBlobVel;
-
-  // Hard wall at tip — crush and rebound with 40% energy
-  if (gBlobPos >= (float)(BLADE_HALF - 1)) {
-    gBlobPos = (float)(BLADE_HALF - 1);
-    gBlobVel = -fabsf(gBlobVel) * 0.40f;
+  if (imuOk) {
+    float ty = constrain(accelZ * 0.5f, -1.0f, 1.0f);
+    fbv = fbv * 0.88f + ty * dt * 8.0f; 
+    fb += fbv * dt * 2.0f;
+    if (fb < 0.1f) { 
+      fb = 0.1f; fbv = -fbv * 0.7f; 
+      for (int i = 0; i < 5; i++) if (!rA[i]) { rA[i] = true; rPos[i] = 0.0f; rT[i] = now; break; }
+    }
+    if (fb > 0.9f) { 
+      fb = 0.9f; fbv = -fbv * 0.7f; 
+      for (int i = 0; i < 5; i++) if (!rA[i]) { rA[i] = true; rPos[i] = 1.0f; rT[i] = now; break; }
+    }
+  } else { 
+    static float sp = 0; sp += dt * 0.5f; fb = 0.5f + sinf(sp) * 0.3f; fbv = cosf(sp) * 0.2f; 
   }
-  // Hard wall at hilt
-  if (gBlobPos < 0.0f) {
-    gBlobPos = 0.0f;
-    gBlobVel =  fabsf(gBlobVel) * 0.50f; // extra bouncy on pullback
+  
+  if (random(100) < 3)
+    for (int i = 0; i < 5; i++) 
+      if (!rA[i]) { rA[i] = true; rPos[i] = 0.5f; rT[i] = now; break; }
+
+  for (int i = 0; i < BLADE_LENGTH; i++) { 
+    int cd = random(10, 25); 
+    heat[i] = (heat[i] > cd) ? heat[i] - cd : 0; 
+  }
+  for(int k = BLADE_LENGTH - 1; k >= 2; k--) 
+    heat[k] = (byte)((heat[k-1] * 0.6f + heat[k-2] * 0.4f));
+
+  int bi = (int)(fb * BLADE_LENGTH); 
+  int bri = 8 + (int)(fabsf(fbv) * 15.0f);
+  for(int i = -bri; i <= bri; i++) {
+    int idx = bi + i;
+    if (idx >= 0 && idx < BLADE_LENGTH) {
+      float d = fabsf((float)i) / (float)bri;
+      int nh = heat[idx] + (int)((1.0f - d) * 200.0f);
+      heat[idx] = (nh > 255) ? 255 : (byte)nh;
+    }
+  }
+
+  for (int i = 0; i < BLADE_LENGTH; i++) {
+    byte t = heat[i]; 
+    uint8_t r, g, b;
+    if(t > 200) { r = 255; g = 255; b = random(30, 80); }
+    else if(t > 150) { r = 255; g = random(80, 120); b = 0; }
+    else if(t > 100) { r = 255; g = random(30, 80);  b = 0; }
+    else if(t > 50)  { r = 200 + random(55); g = random(20, 40); b = 0; }
+    else { r = 100 + random(50); g = 0; b = 0; }
+    bladeSet(i, CRGB(r, g, b));
+  }
+
+  for (int r = 0; r < 5; r++) {
+    if(!rA[r]) continue;
+    float rr = (float)(now - rT[r]) / 800.0f * 0.5f;
+    if (rr > 0.5f) { rA[r] = false; continue; }
+    for (int i = 0; i < BLADE_LENGTH; i++) {
+      float pos = (float)i / (float)BLADE_LENGTH;
+      float dc = fabsf(pos - rPos[r]);
+      float dr2 = fabsf(dc - rr);
+      if(dr2 < 0.05f) {
+        float ints = (1.0f - dr2 / 0.05f) * (1.0f - rr * 2.0f);
+        bladeSet(i, bladeGet(i) + CRGB((uint8_t)(ints * 255.0f), (uint8_t)(ints * 100.0f), 0));
+      }
+    }
   }
 }
 
-void renderGBlob() {
-  // In painter/balls mode the effect handles its own g-force visual
-  if (topMode == 1 || topMode == 2) return;
+// =====================================================================
+// EFFECT 4 — OCEAN WAVES
+// =====================================================================
+void effectOceanWaves() {
+  const float dt = 0.016f;
+  static float wp = 0, ob = 0.5f, obv = 0;
+  static float wgP[3] = {0.2f, 0.5f, 0.8f};
+  static float wgS[3] = {0.15f, 0.2f, 0.18f};
+  static float wgI[3] = {0.8f, 1.0f, 0.9f};
+  static unsigned long wgT[3] = {0};
+  
+  uint32_t now = millis();
+  if (imuOk) {
+    float ty = constrain(accelZ * 0.4f, -1.0f, 1.0f);
+    obv = obv * 0.9f + ty * dt * 6.0f; 
+    ob += obv * dt * 2.0f;
+    if (ob < 0.1f) { 
+      ob = 0.1f; obv = -obv * 0.8f; 
+      wgP[0] = 0; wgS[0] = 0.1f; wgI[0] = 1.0f; wgT[0] = now; 
+    }
+    if (ob > 0.9f) { 
+      ob = 0.9f; obv = -obv * 0.8f; 
+      wgP[2] = 1; wgS[2] = 0.1f; wgI[2] = 1.0f; wgT[2] = now; 
+    }
+  } else { 
+    static float sp = 0; sp += dt * 0.4f; 
+    ob = 0.5f + sinf(sp) * 0.25f; obv = cosf(sp) * 0.15f; 
+  }
+  
+  wp += dt * (2.0f + fabsf(obv) * 3.0f); 
+  if (wp > 6.283f) wp -= 6.283f;
 
-  // Normalised position: 0 = hilt, 1 = tip
-  float t = gBlobPos / (float)(BLADE_HALF - 1);
+  for (int w = 0; w < 3; w++) {
+    if(wgI[w] > 0.1f) {
+      wgS[w] += dt * 0.3f;
+      if(wgP[w] < 0.5f) wgP[w] -= dt * 0.4f; else wgP[w] += dt * 0.4f;
+      wgI[w] *= 0.97f;
+      if(wgP[w] < -0.2f || wgP[w] > 1.2f) wgI[w] = 0;
+    }
+  }
 
-  // Invisible until the blob has moved meaningfully away from hilt
-  if (t < 0.05f) return;
+  if (random(100) < 2) {
+    for (int w = 0; w < 3; w++) {
+      if (wgI[w] < 0.2f) {
+        wgP[w] = 0.4f + (float)random(20) / 100.0f;
+        wgS[w] = 0.08f + (float)random(10) / 100.0f;
+        wgI[w] = 0.6f + (float)random(40) / 100.0f;
+        wgT[w] = now;
+        break;
+      }
+    }
+  }
 
-  // ── Width: wide and soft mid-blade, compressed thin at tip ──────────
-  float width = fmaxf(4.5f - t * 3.0f, 1.2f);   // 4.5 → 1.5 → min 1.2
+  for (int i = 0; i < BLADE_LENGTH; i++) {
+    float pos = (float)i / (float)BLADE_LENGTH;
+    uint8_t bh = 140 + (uint8_t)(pos * 30.0f);
+    uint8_t bs = 255;
+    uint8_t bv = 60 + (uint8_t)(pos * 80.0f);
+    
+    float wave = sinf(pos * 20.0f + wp) * 0.3f + 0.7f; 
+    bv = (uint8_t)((float)bv * wave);
+    
+    for (int w = 0; w < 3; w++) {
+      float dw = fabsf(pos - wgP[w]);
+      if(dw < wgS[w] && wgI[w] > 0.1f) {
+        float wi = (wgS[w] - dw) / wgS[w]; 
+        wi *= wi; wi *= wgI[w];
+        bv = (uint8_t)constrain((int)bv + (int)(wi * 180.0f), 0, 255); 
+        bs = (uint8_t)constrain((int)bs - (int)(wi * 120.0f), 100, 255); 
+        bh = 150 + (uint8_t)(wi * 20.0f);
+        if(wi > 0.7f) { bs = 100; bv = 255; }
+      }
+    }
+    
+    float db = fabsf(pos - ob);
+    if(db < 0.15f) {
+      float bi = (0.15f - db) / 0.15f; 
+      bi *= bi;
+      bv = (uint8_t)constrain((int)bv + (int)(bi * 150.0f), 0, 255);
+      bs = (uint8_t)constrain((int)bs - (int)(bi * 100.0f), 150, 255);
+      if(fabsf(obv) > 0.3f && bi > 0.7f) { bv = 255; bs = 150; }
+    }
+    
+    bladeSet(i, CHSV(bh, bs, bv));
+  }
+  
+  if (fabsf(obv) > 0.2f && random8() < 50) {
+    int rndPos = random(BLADE_LENGTH);
+    bladeSet(rndPos, CHSV(180, 200, 220));
+  }
+}
 
-  // ── Brightness: quadratic — slow build, blazing when slammed to tip ─
-  uint8_t maxBri = (uint8_t)fminf(t * t * 280.0f, 255.0f);
+// =====================================================================
+// EFFECT 5 — PLASMA STORM
+// =====================================================================
+void effectPlasmaStorm() {
+  const float dt = 0.016f;
+  static float p1 = 0, p2 = 0, p3 = 0;
+  
+  p1 += dt * 2.5f; if(p1 > 6.283f) p1 -= 6.283f;
+  p2 += dt * 1.8f; if(p2 > 6.283f) p2 -= 6.283f;
+  p3 += dt * 3.2f; if(p3 > 6.283f) p3 -= 6.283f;
+  
+  for (int i = 0; i < BLADE_LENGTH; i++) {
+    float pos = (float)i / (float)BLADE_LENGTH;
+    float c = (sinf(pos * 10.0f + p1) + sinf(pos * 15.0f - p2) + sinf(pos * 8.0f + p3)) / 3.0f;
+    bladeSet(i, CHSV(200 + (uint8_t)(c * 40.0f), 255, 120 + (uint8_t)(c * 135.0f)));
+  }
+  
+  if (random8() < 30) {
+    int ap = random(BLADE_LENGTH - 5);
+    for (int j = 0; j < 3; j++) {
+      bladeSet(ap + j, CHSV(180, 200, 255));
+    }
+  }
+}
 
-  // ── Colour: violet (hue 210) distinct from base (190) ───────────────
-  // Saturation drops near tip → punchy neon white-violet ("crushed" look)
-  uint8_t sat = (uint8_t)(255.0f - t * 95.0f);   // 255 at hilt → 160 at tip
-
-  int   centre = (int)gBlobPos;
-  float frac   = gBlobPos - centre;
-  int   radius = (int)(width * 2.5f + 1);
-
-  for (int d = -radius; d <= radius; d++) {
-    int pos = centre + d;
-    if (pos < 0 || pos >= BLADE_HALF) continue;
-    float dist    = fabsf((float)d + frac);
-    float falloff = expf(-0.5f * (dist / width) * (dist / width));
-    uint8_t bri   = (uint8_t)((float)maxBri * falloff);
-    if (bri < 4) continue;
-    leds[pos]                += CHSV(210, sat, bri);
-    leds[NUM_LEDS - 1 - pos] += CHSV(210, sat, bri);
+// ─── ROLLING SPARKLE OVERLAY (Replaces gBlob)
+void updateAndRenderRollOverlay() {
+  // If the sword is being twisted significantly along its axis (Z)...
+  float gyroZ_abs = fabsf(twistRate);
+  
+  if (gyroZ_abs > 30.0f) {
+    rollPhase += (twistRate * 0.005f);
+    
+    // Create traveling spiraling sparks along the whole blade based on twist
+    int numSparks = constrain((int)(gyroZ_abs / 20.0f), 1, 8);
+    for (int i = 0; i < numSparks; i++) {
+        int target = random(0, BLADE_LENGTH);
+        float shift = sinf(rollPhase + (target * 0.1f)) + 1.0f;
+        CRGB sparkColor = CHSV(baseHue + (twistRate > 0 ? 30 : -30), 120, (uint8_t)(shift * 127.0f));
+        bladeSet(target, bladeGet(target) + sparkColor); 
+    }
   }
 }
 
@@ -901,12 +1042,11 @@ void renderGBlob() {
 void renderBoostSparks() {
   int count = constrain(3 + (int)(swingMag * 0.06f), 3, 10);
   for (int s = 0; s < count; s++) {
-    int     pos = random(BLADE_HALF);
+    int     pos = random(BLADE_LENGTH);
     uint8_t h   = baseHue + (int8_t)(random8() / 4 - 32);  // slight hue scatter
     uint8_t sat = random8(60, 200);                          // white→coloured range
     uint8_t bri = random8(160, 255);
-    leds[pos]                += CHSV(h, sat, bri);
-    leds[NUM_LEDS - 1 - pos] += CHSV(h, sat, bri);
+    bladeSet(pos, bladeGet(pos) + CHSV(h, sat, bri));
   }
 }
 
@@ -943,7 +1083,7 @@ void setupESPNow() {
 // 2-second cyan sweep hilt→tip (sync-arm animation)
 void renderSyncAnim(float progress) {
   bladeClear();
-  int lit = constrain((int)(progress * BLADE_HALF), 0, BLADE_HALF - 1);
+  int lit = constrain((int)(progress * BLADE_LENGTH), 0, BLADE_LENGTH - 1);
   for (int i = 0; i <= lit; i++) bladeSet(i, CRGB(0, 50, 80));
   bladeSet(lit, CRGB(255, 255, 255));     // bright leading-edge pixel
 }
@@ -956,7 +1096,7 @@ void renderSyncSearching() {
   float   pulse = 0.55f + 0.45f * sinf((float)millis() * 0.003f);
   uint8_t val   = (uint8_t)(200.0f * pulse);
   int     off   = (int)offset;
-  for (int i = 0; i < BLADE_HALF; i++) {
+  for (int i = 0; i < BLADE_LENGTH; i++) {
     uint8_t hue = (((i + off) / 10) % 2) ? 192 : 0;   // 192=purple  0=red
     bladeSet(i, CHSV(hue, 255, val));
   }
@@ -982,10 +1122,9 @@ void renderOTAMode() {
   FastLED.clear();
   for (int i = 0; i < NUM_LEDS; i += 5)
     if (blinkState) leds[i] = CRGB(0, 0, 150);
-  int filled = (otaProgress * BLADE_HALF) / 100;
+  int filled = (otaProgress * BLADE_LENGTH) / 100;
   for (int i = 0; i < filled; i++) {
-    leds[i]                = CRGB(0, 100, 255);
-    leds[NUM_LEDS - 1 - i] = CRGB(0, 100, 255);
+    bladeSet(i, CRGB(0, 100, 255));
   }
   FastLED.show();
 }
@@ -1003,6 +1142,9 @@ void setupWiFiOTA() {
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("WiFi: " + WiFi.localIP().toString());
     if (MDNS.begin(hostname)) Serial.println("mDNS ready");
+    server.on("/", handleRoot);
+    server.on("/mode", handleMode);
+    server.begin();
   }
   ArduinoOTA.setHostname(hostname);
   ArduinoOTA.setPasswordHash(otaHash);
@@ -1014,29 +1156,64 @@ void setupWiFiOTA() {
   setupESPNow();
 }
 
+// =====================================================================
+// WEB SERVER HANDLERS
+// =====================================================================
+void handleRoot() {
+  String html = "<html><head><meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += "<style>body{background:#111;color:#eee;font-family:sans-serif;text-align:center;}";
+  html += "button{display:block;width:90%;margin:15px auto;padding:20px;font-size:20px;background:#334;color:#fff;border:none;border-radius:10px;cursor:pointer;}";
+  html += "button:active{background:#557;}</style></head><body>";
+  html += "<h1>Fullsword Control</h1>";
+  html += "<h3>Active Mode: " + String(effectMode) + "</h3>";
+  
+  html += "<form action='/mode' method='GET'><button name='m' value='0'>Painter</button></form>";
+  html += "<form action='/mode' method='GET'><button name='m' value='1'>Ping Pong</button></form>";
+  html += "<form action='/mode' method='GET'><button name='m' value='2'>Fire Storm</button></form>";
+  html += "<form action='/mode' method='GET'><button name='m' value='3'>Ocean Waves</button></form>";
+  html += "<form action='/mode' method='GET'><button name='m' value='4'>Plasma Storm</button></form>";
+  
+  html += "</body></html>";
+  server.send(200, "text/html", html);
+}
+
+void handleMode() {
+  if (server.hasArg("m")) {
+    int m = server.arg("m").toInt();
+    if (m >= 0 && m <= 4) {
+      effectMode = m;
+      pnt.ready = false;
+      ballsReady = false;
+      bladeClear();
+      if (syncEnabled) sendSyncPacket(SYNC_MSG_MODE, effectMode);
+    }
+  }
+  // Redirect back to root
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
+
 
 // =====================================================================
 // SETUP
 // =====================================================================
 void setup() {
   Serial.begin(115200);
-  pinMode(ACCENT_PIN, OUTPUT);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
 
   FastLED.addLeds<WS2812B, LED_PIN, GRB>(leds, NUM_LEDS);
   FastLED.setBrightness(BRIGHTNESS);
   FastLED.clear(true);
 
-  // Initialise ripple positions to inactive
-  for (int r = 0; r < MAX_RIPPLES; r++) ripplePos[r] = -1.0f;
+
 
   setupIMU();
 
-  // Startup sweep — both sides travel together from hilt to tip
-  for (int i = 0; i < BLADE_HALF; i++) {
+  // Startup sweep — travels from hilt to tip
+  for (int i = 0; i < BLADE_LENGTH; i++) {
     bladeSet(i, CRGB(100, 0, 150));
     FastLED.show();
-    delay(8);
+    delay(4);
   }
   delay(200);
   bladeClear();
@@ -1052,6 +1229,7 @@ void setup() {
 // =====================================================================
 void loop() {
   ArduinoOTA.handle();
+  server.handleClient();
   if (otaActive) { renderOTAMode(); return; }
 
   // ── WiFi reconnect watchdog — restores OTA visibility if link drops ───
@@ -1071,30 +1249,30 @@ void loop() {
     syncGotPacket = false;
     if (syncInType == SYNC_MSG_MODE && syncEnabled) {
       // Paired peer changed mode — apply it here
-      topMode        = syncInMode % 3;
+      effectMode     = syncInMode % 5;
       pnt.ready      = false;
       pntCompressPos = 0.0f;
       pntCompressVel = 0.0f;
       ballsReady     = false;
       bladeClear();
-      const char* names[] = { "Effects", "Painter", "Balls" };
-      Serial.printf("Sync recv: %s\n", names[topMode]);
+      const char* names[] = { "Painter", "PingPong", "FireStorm", "OceanWaves", "PlasmaStorm" };
+      Serial.printf("Sync recv: %s\n", names[effectMode]);
     } else if (syncInType == SYNC_MSG_PING) {
       if (syncSearching) {
         // Found a peer! Pair up and confirm back so they pair too.
         syncSearching = false;
         syncEnabled   = true;
-        sendSyncPacket(SYNC_MSG_PING, topMode);
+        sendSyncPacket(SYNC_MSG_PING, effectMode);
         Serial.println("Sync: PAIRED");
         CRGB fc = CRGB(0, 100, 100);
         for (int f = 0; f < 3; f++) {
-          for (int i = 0; i < BLADE_HALF; i++) bladeSet(i, fc);
+          for (int i = 0; i < BLADE_LENGTH; i++) bladeSet(i, fc);
           FastLED.show(); delay(150);
           bladeClear(); FastLED.show(); delay(100);
         }
       } else if (syncEnabled) {
         // Already paired — respond so a newly-searching sword can find us
-        sendSyncPacket(SYNC_MSG_PING, topMode);
+        sendSyncPacket(SYNC_MSG_PING, effectMode);
       }
     }
   }
@@ -1132,15 +1310,15 @@ void loop() {
   // Dispatch after click window (not held into boost/sync)
   if (!boostMode && !syncAnimating && clickCount > 0 && millis() - lastClickMs > DCLICK_MS) {
     if (clickCount == 2) {   // exactly double-click → cycle mode
-      topMode        = (topMode + 1) % 3;
+      effectMode     = (effectMode + 1) % 5;
       pnt.ready      = false;
       pntCompressPos = 0.0f;
       pntCompressVel = 0.0f;
       ballsReady     = false;
       bladeClear();
-      const char* names[] = { "Effects", "Painter", "Balls" };
-      Serial.printf("Mode: %s\n", names[topMode]);
-      if (syncEnabled) sendSyncPacket(SYNC_MSG_MODE, topMode);  // broadcast to peers
+      const char* names[] = { "Painter", "PingPong", "FireStorm", "OceanWaves", "PlasmaStorm" };
+      Serial.printf("Mode: %s\n", names[effectMode]);
+      if (syncEnabled) sendSyncPacket(SYNC_MSG_MODE, effectMode);  // broadcast to peers
     }
     // Single-click and 3+ quick clicks: discard silently
     clickCount = 0;
@@ -1160,7 +1338,7 @@ void loop() {
         Serial.println("Sync: OFF");
         CRGB fc = CRGB(100, 40, 0);
         for (int f = 0; f < 3; f++) {
-          for (int i = 0; i < BLADE_HALF; i++) bladeSet(i, fc);
+          for (int i = 0; i < BLADE_LENGTH; i++) bladeSet(i, fc);
           FastLED.show(); delay(150);
           bladeClear(); FastLED.show(); delay(100);
         }
@@ -1172,7 +1350,7 @@ void loop() {
         Serial.printf("Sync: searching 60s  MAC: %s\n", WiFi.macAddress().c_str());
         CRGB fc = CRGB(0, 80, 100);
         for (int f = 0; f < 3; f++) {
-          for (int i = 0; i < BLADE_HALF; i++) bladeSet(i, fc);
+          for (int i = 0; i < BLADE_LENGTH; i++) bladeSet(i, fc);
           FastLED.show(); delay(150);
           bladeClear(); FastLED.show(); delay(100);
         }
@@ -1194,12 +1372,12 @@ void loop() {
       Serial.println("Sync: search timed out — no peer found");
       CRGB fc = CRGB(100, 40, 0);
       for (int f = 0; f < 3; f++) {
-        for (int i = 0; i < BLADE_HALF; i++) bladeSet(i, fc);
+        for (int i = 0; i < BLADE_LENGTH; i++) bladeSet(i, fc);
         FastLED.show(); delay(150);
         bladeClear(); FastLED.show(); delay(100);
       }
     } else if (millis() - lastPingMs > 500) {
-      sendSyncPacket(SYNC_MSG_PING, topMode);
+      sendSyncPacket(SYNC_MSG_PING, effectMode);
       lastPingMs = millis();
     }
   }
@@ -1207,22 +1385,20 @@ void loop() {
   // ── Effects (or sync-searching override) ──────────────────────────────
   if (syncSearching) {
     renderSyncSearching();
-  } else if (topMode == 1) {
-    effectPainter();
-  } else if (topMode == 2) {
-    effectBalls();
   } else {
+    // Primary Modes Dispatched Here
     switch (effectMode) {
-      case 0: effectChaser(); break;
-      case 1: effectPulse();  break;
-      case 2: effectRipple(); break;
+      case 0: effectPainter(); break;
+      case 1: effectPingPong(); break;
+      case 2: effectFireStorm(); break;
+      case 3: effectOceanWaves(); break;
+      case 4: effectPlasmaStorm(); break;
     }
   }
 
-  // G-force blob — skip during sync search (blade is already taken)
+  // Roll Overlay — skip during sync search (blade is already taken)
   if (!syncSearching) {
-    updateBlobPhysics();
-    renderGBlob();
+    updateAndRenderRollOverlay();
   }
 
   if (boostMode) {
@@ -1241,6 +1417,9 @@ void loop() {
   if (!syncSearching) {
     updateAndRenderImpacts();
   }
+  
+  // Render accent LEDs base animation last
+  renderAccents();
 
   FastLED.show();
   delay(16);   // ~60 fps

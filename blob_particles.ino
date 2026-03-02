@@ -23,7 +23,7 @@ void initTrailSystem() {
 }
 void initFluidBlob() {
   blob.position=0.5f; blob.velocity=0.0f; blob.lastPosition=0.5f;
-  blob.mass=0.3f; blob.size=0.25f;
+  blob.mass=0.3f; blob.size=0.30f;  // slightly larger for better visibility
   blob.pulsePhase=0.0f; blob.breathePhase=0.0f; blob.heat=0.5f;
   for (int i=0;i<5;i++) blob.waves[i].active=false;
   initRedParticles();
@@ -34,7 +34,7 @@ void addTrailSegment(float pos, float vel, float redInfluence=0.0f, bool isPull=
     if (!trailSegments[i].active){
       trailSegments[i].position=pos;
       trailSegments[i].intensity=1.0f;
-      trailSegments[i].hue=220+random(30)-15;
+      trailSegments[i].hue=238+random(12)-6;   // deep purple trail (was 220±15)
       trailSegments[i].size=0.02f+fabs(vel)*0.03f;
       trailSegments[i].age=0.0f;
       trailSegments[i].active=true;
@@ -99,9 +99,10 @@ void updateFluidBlob(float dt) {
     blob.position=0.5f+sin(simulatedMotion*0.8f)*0.1f;
     blob.velocity=cos(simulatedMotion*0.8f)*0.08f;
   } else {
-    float accelY=clampf(accel[1]*0.5f,-1.0f,1.0f);
-    float change=(accelY-lastAccelY)*0.4f; lastAccelY=accelY;
-    blob.velocity=blob.velocity*0.88f+(accelY*1.2f+change*0.3f)*dt*10.0f;
+    float accelY=clampf(accel[1]*0.8f,-1.2f,1.2f);           // was *0.5f ±1.0 — stronger input
+    float jerk=clampf((accelY-lastAccelY)*5.0f,-2.5f,2.5f);  // derivative spike for instant reaction
+    lastAccelY=accelY;
+    blob.velocity=blob.velocity*0.88f+(accelY*1.8f+jerk*1.5f)*dt*10.0f;
     blob.position+=blob.velocity*dt*2.5f;
   }
   if (blob.position<0.1f){blob.position=0.1f+(0.1f-blob.position)*0.3f;blob.velocity=-blob.velocity*0.7f;}
@@ -178,20 +179,20 @@ void renderRedBackground() {
   uint32_t now=millis();
   for (int i=HEAD_LENGTH;i<HEAD_LENGTH+STAFF_LENGTH;i++){
     float pos=(float)(i-HEAD_LENGTH)/(float)STAFF_LENGTH;
-    uint8_t h=235+(uint8_t)(sin(now*0.0003f+pos*4.0f)*8);
-    uint8_t v=80+(uint8_t)(sin(now*0.0005f+pos*2.0f)*30);
-    leds[i]=CHSV(h,200,v);
+    uint8_t h=240+(uint8_t)(sin(now*0.0003f+pos*4.0f)*6);   // was 235 — deeper violet-purple
+    uint8_t v=100+(uint8_t)(sin(now*0.0005f+pos*2.0f)*40);  // was 80+30 — brighter base
+    leds[i]=CHSV(h,230,v);  // was sat 200 — richer saturation
   }
   for (int i=0;i<MAX_RED_PARTICLES;i++){
     RedParticle &p=redParticles[i];
     if (p.position<0||p.position>1) continue;
     int idx=HEAD_LENGTH+(int)(p.position*(STAFF_LENGTH-1));
     if (idx<HEAD_LENGTH||idx>=HEAD_LENGTH+STAFF_LENGTH) continue;
-    uint8_t h=235+(uint8_t)(sin(p.sparklePhase)*12);
-    uint8_t s=200,v=100+(uint8_t)(p.charge*50);
-    if (p.isPushed){ h=220+(uint8_t)(p.displacement*80); v=clampf(v+p.displacement*120,0,255); s=255;
-      if (sin(p.sparklePhase*3.0f)>0.7f){v=255;h=245;} }
-    if (p.isPulled){ h=230; v=clampf(v+80,0,200); s=220; }
+    uint8_t h=240+(uint8_t)(sin(p.sparklePhase)*10);         // was 235+12 — deeper purple
+    uint8_t s=230,v=115+(uint8_t)(p.charge*60);              // was s=200,v=100+50 — brighter
+    if (p.isPushed){ h=240+(uint8_t)(p.displacement*30); v=clampf(v+p.displacement*140,0,255); s=255;
+      if (sin(p.sparklePhase*3.0f)>0.7f){v=255;h=248;} }
+    if (p.isPulled){ h=242; v=clampf(v+100,0,230); s=245; }  // was h=230,v+80,s=220
     int spread=p.displacement>0.05f?2:1;
     for (int ss=-spread;ss<=spread;ss++){
       int si=idx+ss;
@@ -217,7 +218,7 @@ void renderTrailSystem() {
       float d=fabs(rr)/(float)(r+1);
       float ints=(1.0f-d)*seg.intensity;
       uint8_t h=seg.hue,s=200;
-      if (seg.isPullTrail){h=235;s=220;}
+      if (seg.isPullTrail){h=242;s=245;}  // deeper purple pull trail (was 235,220)
       CRGB tc=CHSV(h,s,(uint8_t)(ints*160));
       leds[idx]+=tc;  // FastLED += is saturating; no overflow check needed
     }
@@ -255,8 +256,8 @@ void renderFluidBlob() {
     float ints=(d<0.6f)?(1.0f-d*d*1.5f):smoothstep(1.0f,0.6f,d);
     ints*=(1.0f+edgeSpike*0.5f);
     ints*=sin(d*12.0f+now*0.003f)*0.2f+0.8f;
-    CRGB fc=CHSV(215,220+(uint8_t)(ints*35),(uint8_t)(ints*180));
-    if (d<0.4f){CRGB cw=CRGB(60,50,70);cw.nscale8_video((uint8_t)((0.4f-d)/0.4f*80));fc+=cw;}
+    CRGB fc=CHSV(240,255,(uint8_t)(ints*235));  // deep violet-purple, full sat, much brighter (was hue 215, sat 220, val 180)
+    if (d<0.4f){CRGB cw=CRGB(80,20,140);cw.nscale8_video((uint8_t)((0.4f-d)/0.4f*120));fc+=cw;}  // richer purple-white core
     leds[idx]=blend(leds[idx],fc,220);
   }
   renderTrailSystem();
@@ -299,6 +300,63 @@ void renderHeadAndTail() {
     if(htState.tailImpactIntensity>0){ CRGB f=CHSV(180,255,255);
       c1=blend(c1,f,(uint8_t)(htState.tailImpactIntensity*255)); c2=blend(c2,f,(uint8_t)(htState.tailImpactIntensity*255)); }
     leds[t1]=c1; leds[t2]=c2;
+  }
+
+}
+// ── Roll effect helpers — called from individual effects after renderHeadAndTail() ──
+// Pastel strobe: for Purple Blob and Rainbow Painter only
+void applyRollStrobePastel() {
+  float absRoll = fabs(rollRate);
+  if (absRoll <= 55.0f) return;
+  uint32_t ms       = millis();
+  uint32_t periodMs = (uint32_t)max(50, 280 - (int)absRoll);
+  uint32_t slot     = ms / periodMs;
+  uint8_t strobeHue = (uint8_t)(slot * 97);      // golden-angle hue → diverse pastel palette
+  uint8_t blendAmt  = (uint8_t)(clampf((absRoll - 55.0f) / 145.0f, 0.0f, 1.0f) * 240.0f);
+  CRGB sc = CHSV(strobeHue, 105, 240);           // pastel: sat ~40 %
+  for (int i = 0; i < HEAD_LENGTH; i++)
+    leds[i] = blend(leds[i], sc, blendAmt);
+  for (int hi = 0; hi < HEAD_LENGTH; hi++) {
+    int t1 = TAIL_START + TAIL_OFFSET + hi*2;
+    int t2 = t1 + 1;
+    if (t1 < NUM_LEDS) leds[t1] = blend(leds[t1], sc, blendAmt);
+    if (t2 < NUM_LEDS) leds[t2] = blend(leds[t2], sc, blendAmt);
+  }
+}
+// Rainbow strobe: for Rainbow Painter — full-sat rapid hue cycling
+void applyRollStrobeRainbow() {
+  float absRoll = fabs(rollRate);
+  if (absRoll <= 55.0f) return;
+  uint32_t ms       = millis();
+  uint32_t periodMs = (uint32_t)max(25, 180 - (int)(absRoll * 0.7f)); // faster than pastel
+  uint32_t slot     = ms / periodMs;
+  uint8_t strobeHue = (uint8_t)(slot * 43);      // denser hue steps → rainbow feel
+  uint8_t blendAmt  = (uint8_t)(clampf((absRoll - 55.0f) / 145.0f, 0.0f, 1.0f) * 240.0f);
+  CRGB sc = CHSV(strobeHue, 255, 255);           // vivid full-sat rainbow
+  for (int i = 0; i < HEAD_LENGTH; i++)
+    leds[i] = blend(leds[i], sc, blendAmt);
+  for (int hi = 0; hi < HEAD_LENGTH; hi++) {
+    int t1 = TAIL_START + TAIL_OFFSET + hi*2;
+    int t2 = t1 + 1;
+    if (t1 < NUM_LEDS) leds[t1] = blend(leds[t1], sc, blendAmt);
+    if (t2 < NUM_LEDS) leds[t2] = blend(leds[t2], sc, blendAmt);
+  }
+}
+// Thematic glow: for all other effects — pulsing spin-speed glow in the effect's own colour
+void applyRollGlow(uint8_t hue, uint8_t sat) {
+  float absRoll = fabs(rollRate);
+  if (absRoll <= 55.0f) return;
+  float strength = clampf((absRoll - 55.0f) / 145.0f, 0.0f, 1.0f);
+  float pulse    = fabs(sin(vortexPhase * 12.57f)) * 0.45f + 0.55f; // pulses with spin speed
+  uint8_t blendAmt = (uint8_t)(strength * pulse * 220.0f);
+  CRGB sc = CHSV(hue, sat, 240);
+  for (int i = 0; i < HEAD_LENGTH; i++)
+    leds[i] = blend(leds[i], sc, blendAmt);
+  for (int hi = 0; hi < HEAD_LENGTH; hi++) {
+    int t1 = TAIL_START + TAIL_OFFSET + hi*2;
+    int t2 = t1 + 1;
+    if (t1 < NUM_LEDS) leds[t1] = blend(leds[t1], sc, blendAmt);
+    if (t2 < NUM_LEDS) leds[t2] = blend(leds[t2], sc, blendAmt);
   }
 }
 // ── finish helpers ─────────────────────────────────────────────────────────

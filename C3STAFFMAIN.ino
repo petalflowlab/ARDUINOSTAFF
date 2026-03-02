@@ -23,12 +23,12 @@ String getHTML();
 
 
 #define HEAD_LENGTH     4       // LEDs in head flower
-#define TAIL_START      137     // Where you want tail to begin (sets staff length)
-#define TAIL_OFFSET     10      // Black gap before tail flower
+#define TAIL_START      145     // Where you want tail to begin (sets staff length)
+#define TAIL_OFFSET     2      // Black gap before tail flower
 
 #define STAFF_LENGTH         (TAIL_START - HEAD_LENGTH)                    // Staff fills head-to-tail
 #define STAFF_START          HEAD_LENGTH                                   // Staff starts after head
-#define TAIL_FLOWER_LENGTH   (HEAD_LENGTH * 2)                             // Tail mirrors head
+#define TAIL_FLOWER_LENGTH   (HEAD_LENGTH * 3)                             // Tail mirrors head
 #define TAIL_LENGTH          TAIL_FLOWER_LENGTH                            // Tail flower ONLY (no offset)
 #define NUM_LEDS             (TAIL_START + TAIL_OFFSET + TAIL_FLOWER_LENGTH) // PHYSICAL LED COUNT
 #define DEFAULT_BRIGHTNESS   170
@@ -108,18 +108,21 @@ enum EffectPage { PAGE_1=0, PAGE_2=1, PAGE_3=2, PAGE_4=3, PAGE_5=4, PAGE_6=5 };
 int currentPage   = PAGE_1;
 int currentEffect = 0;
 
-const char* page1Effects[] = {"Purple Blob","Rainbow Painter","Fire Storm","Ocean Waves","Crystal Pulse","Ping Pong"};
+const char* page1Effects[] = {"Purple Blob","Rainbow Painter","Fire Storm","Ocean Waves","Forest Fairies","Ping Pong","80s Blocks","Slinky","Ink Drop","Ripple Tank","Supernova","Bioluminescence","Solar Flare"};
 const char* page2Effects[] = {"Audio Pulse","Beat Sparkle","Sound Wave","Color Shift","Audio Fire"};
 const char* page3Effects[] = {"Plasma Storm","Lightning Strike","Comet Trail","Aurora Flow","Galaxy Swirl"};
 const char* page4Effects[] = {"Ocean Breeze","Sunset Fade","Forest Mist","Aurora Dreams","Lava Flow"};
 const char* page5Effects[] = {"Watermelon","Citrus Burst","Berry Blast","Mango Swirl","Kiwi Spark"};
-const char* page6Effects[] = {"Newton's Cradle","Slinky","Ink Drop","Ripple Tank","Supernova","Bioluminescence","Plasma Waves","Electron Orbit","DNA Helix","Meteor Shower","Magnetic Pull","Solar Flare","Molecular Vibe","Black Hole"};
+const char* page6Effects[] = {"Plasma Waves","Electron Orbit","DNA Helix","Meteor Shower","Magnetic Pull","Molecular Vibe","Black Hole"};
 
 // GLOBAL CONTROLS
 // =====================================================================
 bool    autoCycle        = false;
 float   autoCycleTimer   = 0.0f;
 float   autoCycleSeconds = 10.0f;
+bool    pageCycleEnabled  = false;   // cycle effects within current page only
+float   pageCycleSeconds  = 8.0f;   // seconds per effect
+float   pageCycleTimer    = 0.0f;
 uint8_t globalBrightness = DEFAULT_BRIGHTNESS;
 uint8_t globalSpeed      = 128;
 bool    effectEnabled    = true;
@@ -173,8 +176,10 @@ struct RainbowPainter {
   float mixingBuffer[144];
   bool  initialized;
   float dominantHue,dominantZoneWidth,rollShiftAccum,dominantFade;
+  float crushFactor, crushVel;   // crush/decompress animation (jerk wall-slam)
+  int   crushDir;                // -1=toward head, +1=toward tail
 };
-RainbowPainter rainbowPainter = {0.5f,0.0f,0.0f,{0},false,0.0f,0.0f,0.0f,0.0f};
+RainbowPainter rainbowPainter = {0.5f,0.0f,0.0f,{0},false,0.0f,0.0f,0.0f,0.0f, 0.0f,0.0f,0};
 
 // INK DISPERSION PARTICLES
 // =====================================================================
@@ -359,6 +364,23 @@ void loop() {
   updateButton(btn2, BUTTON_PIN_2);
   updateIMU();
   processAudio();
+
+  // Page cycle: step through effects on the current page, stay on same page
+  if (pageCycleEnabled && !blackout && !otaInProgress && !customColorMode) {
+    static uint32_t lastPCMs = 0;
+    uint32_t pcNow = millis();
+    float pcDt = clampf((pcNow - lastPCMs) / 1000.0f, 0.0f, 0.1f);
+    lastPCMs = pcNow;
+    pageCycleTimer += pcDt;
+    if (pageCycleTimer >= pageCycleSeconds) {
+      pageCycleTimer = 0.0f;
+      int maxE = 5;
+      if (currentPage == 0) maxE = 13;
+      if (currentPage == 3) maxE = 10;
+      if (currentPage == 5) maxE = 7;
+      currentEffect = (currentEffect + 1) % maxE;
+    }
+  }
 
   // Auto-cycle (only in effect mode, not custom mode)
   if (autoCycle && !blackout && !otaInProgress && !customColorMode) {

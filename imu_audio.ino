@@ -15,7 +15,7 @@ void updateButton(ButtonState &btn, int pin) {
   if (!btn.processed && btn.clickCount>0 && (now-btn.lastClickTime)>DOUBLE_CLICK_WINDOW) {
     btn.processed = true;
     if (btn.clickCount==1) {
-      currentEffect = (currentEffect+1) % ((currentPage==0||currentPage==5)?6:5);
+      currentEffect = (currentEffect+1) % (currentPage==0?13:currentPage==5?7:5);
       fill_solid(leds, NUM_LEDS, CRGB::White); FastLED.show(); delay(50);
     } else if (btn.clickCount>=2) {
       currentPage = (currentPage+1) % NUM_PAGES;
@@ -40,7 +40,7 @@ void updateIMU() {
   if (!mpu_ok) return;
   mpu.update();
   static float smoothAccel[3] = {0};
-  float alpha = 0.2f;
+  float alpha = 0.35f;  // increased from 0.2 for faster IMU response to quick tilts
   accelRaw[0]=mpu.getAccX(); accelRaw[1]=mpu.getAccY(); accelRaw[2]=mpu.getAccZ();
   float rad = IMU_TILT_COMPENSATION * 0.0174533f;
   float cY  = accelRaw[1]*cos(rad) - accelRaw[2]*sin(rad);
@@ -50,7 +50,18 @@ void updateIMU() {
   smoothAccel[2]=smoothAccel[2]*(1.0f-alpha)+cZ*alpha;
   accel[0]=smoothAccel[0]; accel[1]=smoothAccel[1]; accel[2]=smoothAccel[2];
   gyro[0]=mpu.getGyroX(); gyro[1]=mpu.getGyroY(); gyro[2]=mpu.getGyroZ();
-
+static uint32_t lastPrint = 0;
+  if (millis() - lastPrint > 500) { // Print every 500ms to avoid flooding the monitor
+    lastPrint = millis();
+    Serial.print("Accel X/Y/Z: ");
+    Serial.print(accel[0]); Serial.print(", ");
+    Serial.print(accel[1]); Serial.print(", ");
+    Serial.print(accel[2]);
+    Serial.print(" | Gyro X/Y/Z: ");
+    Serial.print(gyro[0]); Serial.print(", ");
+    Serial.print(gyro[1]); Serial.print(", ");
+    Serial.println(gyro[2]);
+  }
   // === ROLL DETECTION (Y-axis = staff long axis) ===
   // gyro[1] is angular velocity around the staff's own axis (deg/sec).
   // Positive = roll one way, negative = roll the other way.

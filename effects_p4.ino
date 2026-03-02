@@ -2,12 +2,24 @@
 void renderOceanBreezeEffect(float dt) {
   static float p1=0,p2=0,p3=0;
   float sm=globalSpeed/128.0f;
-  int ci=STAFF_LENGTH/2;
-  p1+=dt*0.4f*sm; if(p1>6.283f)p1-=6.283f;
-  p2+=dt*0.6f*sm; if(p2>6.283f)p2-=6.283f;
-  p3+=dt*0.3f*sm; if(p3>6.283f)p3-=6.283f;
+  float ty = mpu_ready ? clampf(accel[1], -1.0f, 1.0f) : 0.0f;
+  static float lastAccelY1 = 0;
+  float jerk = mpu_ready ? clampf((ty - lastAccelY1)*5.0f, -3.0f, 3.0f) : 0.0f;
+  lastAccelY1 = ty;
+  int ci = STAFF_LENGTH/2 + (int)(ty * (STAFF_LENGTH/2.5f));
+  ci = constrain(ci, 4, STAFF_LENGTH-5);
+  float rollSpd = mpu_ready ? fabs(rollRate)*0.015f : 0.0f;
+  
+  if (fabs(jerk) > 1.5f) {
+     htState.headImpactIntensity = max(htState.headImpactIntensity, fabs(jerk)*0.8f);
+     htState.tailImpactIntensity = max(htState.tailImpactIntensity, fabs(jerk)*0.8f);
+  }
+
+  p1+=dt*(0.4f*sm + rollSpd); if(p1>6.283f)p1-=6.283f;
+  p2+=dt*(0.6f*sm + rollSpd); if(p2>6.283f)p2-=6.283f;
+  p3+=dt*(0.3f*sm + rollSpd); if(p3>6.283f)p3-=6.283f;
   for(int i=0;i<STAFF_LENGTH;i++){
-    float d=fabs((float)i-ci)/ci;
+    float d=fabs((float)i-ci)/((float)STAFF_LENGTH*0.5f);
     float w1=sin(d*8-p1)*0.5f+0.5f,w2=sin(d*12+p2)*0.5f+0.5f,w3=sin(d*5-p3*0.7f)*0.5f+0.5f;
     uint8_t h=(uint8_t)(140+w1*60);
     uint8_t s=180+(uint8_t)(w2*60);
@@ -19,10 +31,22 @@ void renderOceanBreezeEffect(float dt) {
 void renderSunsetFadeEffect(float dt) {
   static float sp=0;
   float sm=globalSpeed/128.0f;
-  int ci=STAFF_LENGTH/2;
-  sp+=dt*0.2f*sm; if(sp>6.283f)sp-=6.283f;
+  float ty = mpu_ready ? clampf(accel[1], -1.0f, 1.0f) : 0.0f;
+  static float lastAccelY2 = 0;
+  float jerk = mpu_ready ? clampf((ty - lastAccelY2)*5.0f, -3.0f, 3.0f) : 0.0f;
+  lastAccelY2 = ty;
+  int ci = STAFF_LENGTH/2 + (int)(ty * (STAFF_LENGTH/2.5f));
+  ci = constrain(ci, 4, STAFF_LENGTH-5);
+  float rollSpd = mpu_ready ? fabs(rollRate)*0.015f : 0.0f;
+  
+  if (fabs(jerk) > 1.5f) {
+     htState.headImpactIntensity = max(htState.headImpactIntensity, fabs(jerk)*0.8f);
+     htState.tailImpactIntensity = max(htState.tailImpactIntensity, fabs(jerk)*0.8f);
+  }
+
+  sp+=dt*(0.2f*sm + rollSpd); if(sp>6.283f)sp-=6.283f;
   for(int i=0;i<STAFF_LENGTH;i++){
-    float d=fabs((float)i-ci)/ci;
+    float d=fabs((float)i-ci)/((float)STAFF_LENGTH*0.5f);
     float hp=d+sin(sp+d*2)*0.15f;
     float hue;
     if(hp<0.4f) hue=hp*15;
@@ -37,11 +61,23 @@ void renderSunsetFadeEffect(float dt) {
 void renderForestMistEffect(float dt) {
   static float mp1=0,mp2=0,cc[144]={0};
   float sm=globalSpeed/128.0f;
-  int ci=STAFF_LENGTH/2;
-  mp1+=dt*0.5f*sm; if(mp1>6.283f)mp1-=6.283f;
-  mp2+=dt*0.35f*sm; if(mp2>6.283f)mp2-=6.283f;
+  float ty = mpu_ready ? clampf(accel[1], -1.0f, 1.0f) : 0.0f;
+  static float lastAccelY3 = 0;
+  float jerk = mpu_ready ? clampf((ty - lastAccelY3)*5.0f, -3.0f, 3.0f) : 0.0f;
+  lastAccelY3 = ty;
+  int ci = STAFF_LENGTH/2 + (int)(ty * (STAFF_LENGTH/2.5f));
+  ci = constrain(ci, 4, STAFF_LENGTH-5);
+  float rollSpd = mpu_ready ? fabs(rollRate)*0.015f : 0.0f;
+  
+  if (fabs(jerk) > 1.5f) {
+     htState.headImpactIntensity = max(htState.headImpactIntensity, fabs(jerk)*0.8f);
+     htState.tailImpactIntensity = max(htState.tailImpactIntensity, fabs(jerk)*0.8f);
+  }
+
+  mp1+=dt*(0.5f*sm + rollSpd); if(mp1>6.283f)mp1-=6.283f;
+  mp2+=dt*(0.35f*sm + rollSpd); if(mp2>6.283f)mp2-=6.283f;
   for(int i=0;i<STAFF_LENGTH;i++){
-    float d=fabs((float)i-ci)/ci;
+    float d=fabs((float)i-ci)/((float)STAFF_LENGTH*0.5f);
     float f1=sin(d*10-mp1)*0.5f+0.5f,f2=sin(d*12+mp2)*0.5f+0.5f;
     float col=f1*f2*4; if(col>1)col=1;
     cc[i]=cc[i]*0.9f+col*0.1f;
@@ -55,10 +91,22 @@ void renderForestMistEffect(float dt) {
 void renderAuroraDreamsEffect(float dt) {
   static float dp=0,wp[3]={0,1.5f,3.0f};
   float sm=globalSpeed/128.0f;
-  int ci=STAFF_LENGTH/2;
-  dp+=dt*0.4f*sm; if(dp>6.283f)dp-=6.283f;
+  float ty = mpu_ready ? clampf(accel[1], -1.0f, 1.0f) : 0.0f;
+  static float lastAccelY4 = 0;
+  float jerk = mpu_ready ? clampf((ty - lastAccelY4)*5.0f, -3.0f, 3.0f) : 0.0f;
+  lastAccelY4 = ty;
+  int ci = STAFF_LENGTH/2 + (int)(ty * (STAFF_LENGTH/2.5f));
+  ci = constrain(ci, 4, STAFF_LENGTH-5);
+  float rollSpd = mpu_ready ? fabs(rollRate)*0.015f : 0.0f;
+  
+  if (fabs(jerk) > 1.5f) {
+     htState.headImpactIntensity = max(htState.headImpactIntensity, fabs(jerk)*0.8f);
+     htState.tailImpactIntensity = max(htState.tailImpactIntensity, fabs(jerk)*0.8f);
+  }
+
+  dp+=dt*(0.4f*sm + rollSpd); if(dp>6.283f)dp-=6.283f;
   for(int i=0;i<STAFF_LENGTH;i++){
-    float d=fabs((float)i-ci)/ci;
+    float d=fabs((float)i-ci)/((float)STAFF_LENGTH*0.5f);
     float c1=sin(d*12-wp[0]-dp)*0.5f+0.5f;
     float c2=sin(d*8+wp[1]+dp*0.8f)*0.5f+0.5f;
     float c3=sin(d*16-wp[2]-dp*1.2f)*0.5f+0.5f;
@@ -73,11 +121,23 @@ void renderAuroraDreamsEffect(float dt) {
 void renderLavaFlowEffect(float dt) {
   static float lp=0,bp2=0;
   float sm=globalSpeed/128.0f;
-  int ci=STAFF_LENGTH/2;
-  lp+=dt*0.3f*sm; if(lp>6.283f)lp-=6.283f;
-  bp2+=dt*2*sm; if(bp2>6.283f)bp2-=6.283f;
+  float ty = mpu_ready ? clampf(accel[1], -1.0f, 1.0f) : 0.0f;
+  static float lastAccelY5 = 0;
+  float jerk = mpu_ready ? clampf((ty - lastAccelY5)*5.0f, -3.0f, 3.0f) : 0.0f;
+  lastAccelY5 = ty;
+  int ci = STAFF_LENGTH/2 + (int)(ty * (STAFF_LENGTH/2.5f));
+  ci = constrain(ci, 4, STAFF_LENGTH-5);
+  float rollSpd = mpu_ready ? fabs(rollRate)*0.015f : 0.0f;
+  
+  if (fabs(jerk) > 1.5f) {
+     htState.headImpactIntensity = max(htState.headImpactIntensity, fabs(jerk)*0.8f);
+     htState.tailImpactIntensity = max(htState.tailImpactIntensity, fabs(jerk)*0.8f);
+  }
+
+  lp+=dt*(0.3f*sm + rollSpd); if(lp>6.283f)lp-=6.283f;
+  bp2+=dt*(2*sm + rollSpd*2.0f); if(bp2>6.283f)bp2-=6.283f;
   for(int i=0;i<STAFF_LENGTH;i++){
-    float d=fabs((float)i-ci)/ci;
+    float d=fabs((float)i-ci)/((float)STAFF_LENGTH*0.5f);
     float f1=sin(d*6-lp)*0.5f+0.5f,f2=sin(d*10-lp*0.7f)*0.5f+0.5f;
     float bfreq=40-d*20;
     float bub=sin(d*bfreq+bp2)*0.5f+0.5f;
@@ -94,13 +154,25 @@ void renderSmokeyCloudstormEffect(float dt) {
   static uint32_t lastLightning=0;
   uint32_t now=millis();
   float sm=globalSpeed/128.0f;
-  int ci=STAFF_LENGTH/2;
+  float ty = mpu_ready ? clampf(accel[1], -1.0f, 1.0f) : 0.0f;
+  static float lastAccelY6 = 0;
+  float jerk = mpu_ready ? clampf((ty - lastAccelY6)*5.0f, -3.0f, 3.0f) : 0.0f;
+  lastAccelY6 = ty;
+  int ci = STAFF_LENGTH/2 + (int)(ty * (STAFF_LENGTH/2.5f));
+  ci = constrain(ci, 4, STAFF_LENGTH-5);
+  float rollSpd = mpu_ready ? fabs(rollRate)*0.015f : 0.0f;
   
-  cloudPhase+=dt*0.4f*sm; if(cloudPhase>6.283f)cloudPhase-=6.283f;
-  turbulence+=dt*1.5f*sm; if(turbulence>6.283f)turbulence-=6.283f;
+  if (fabs(jerk) > 1.5f) {
+     htState.headImpactIntensity = max(htState.headImpactIntensity, fabs(jerk)*0.8f);
+     htState.tailImpactIntensity = max(htState.tailImpactIntensity, fabs(jerk)*0.8f);
+     if(now-lastLightning>500) lastLightning=now;
+  }
+  
+  cloudPhase+=dt*(0.4f*sm + rollSpd); if(cloudPhase>6.283f)cloudPhase-=6.283f;
+  turbulence+=dt*(1.5f*sm + rollSpd*2.0f); if(turbulence>6.283f)turbulence-=6.283f;
   
   for(int i=0;i<STAFF_LENGTH;i++){
-    float d=fabs((float)i-ci)/(float)ci;
+    float d=fabs((float)i-ci)/((float)STAFF_LENGTH*0.5f);
     
     float cloud1=sin(d*4-cloudPhase)*0.5f+0.5f;
     float cloud2=sin(d*7+cloudPhase*0.7f)*0.5f+0.5f;
@@ -137,7 +209,19 @@ void renderDandelionSeedsEffect(float dt) {
   static float seedAges[20];
   static bool seedsInit=false;
   float sm=globalSpeed/128.0f;
-  int ci=STAFF_LENGTH/2;
+  float ty = mpu_ready ? clampf(accel[1], -1.0f, 1.0f) : 0.0f;
+  static float lastAccelY7 = 0;
+  float jerk = mpu_ready ? clampf((ty - lastAccelY7)*5.0f, -3.0f, 3.0f) : 0.0f;
+  lastAccelY7 = ty;
+  int ci = STAFF_LENGTH/2 + (int)(ty * (STAFF_LENGTH/2.5f));
+  ci = constrain(ci, 4, STAFF_LENGTH-5);
+  float rollSpd = mpu_ready ? fabs(rollRate)*0.015f : 0.0f;
+  
+  if (fabs(jerk) > 1.5f) {
+     htState.headImpactIntensity = max(htState.headImpactIntensity, fabs(jerk)*0.8f);
+     htState.tailImpactIntensity = max(htState.tailImpactIntensity, fabs(jerk)*0.8f);
+     for(int i=0; i<5; i++) seedAges[random(20)] = 0.8f;
+  }
   
   if(!seedsInit){
     for(int i=0;i<20;i++){seeds[i]=0;seedAges[i]=random(100)/100.0f;}
@@ -146,13 +230,13 @@ void renderDandelionSeedsEffect(float dt) {
   
   fadeToBlackBy(leds+HEAD_LENGTH,STAFF_LENGTH,40);
   for(int i=0;i<STAFF_LENGTH;i++){
-    float d=fabs((float)i-ci)/(float)ci;
+    float d=fabs((float)i-ci)/((float)STAFF_LENGTH*0.5f);
     uint8_t val=(uint8_t)((100-d*60)*0.6f);
     leds[HEAD_LENGTH+i]=CHSV(50,180,val);
   }
   
   for(int s=0;s<20;s++){
-    seeds[s]+=dt*20*sm*(0.5f+seedAges[s]*0.5f);
+    seeds[s]+=dt*20*(sm + rollSpd*2.0f)*(0.5f+seedAges[s]*0.5f);
     seedAges[s]+=dt*0.3f;
     
     if(seeds[s]>ci){
@@ -181,12 +265,23 @@ void renderTulipBouquetEffect(float dt) {
   static float swayPhase=0;
   static uint8_t tulipHues[10]={0,5,224,230,42,238,3,245,40,250};
   float sm=globalSpeed/128.0f;
-  int ci=STAFF_LENGTH/2;
+  float ty = mpu_ready ? clampf(accel[1], -1.0f, 1.0f) : 0.0f;
+  static float lastAccelY8 = 0;
+  float jerk = mpu_ready ? clampf((ty - lastAccelY8)*5.0f, -3.0f, 3.0f) : 0.0f;
+  lastAccelY8 = ty;
+  int ci = STAFF_LENGTH/2 + (int)(ty * (STAFF_LENGTH/2.5f));
+  ci = constrain(ci, 4, STAFF_LENGTH-5);
+  float rollSpd = mpu_ready ? fabs(rollRate)*0.015f : 0.0f;
   
-  swayPhase+=dt*0.8f*sm; if(swayPhase>6.283f)swayPhase-=6.283f;
+  if (fabs(jerk) > 1.5f) {
+     htState.headImpactIntensity = max(htState.headImpactIntensity, fabs(jerk)*0.8f);
+     htState.tailImpactIntensity = max(htState.tailImpactIntensity, fabs(jerk)*0.8f);
+  }
+  
+  swayPhase+=dt*(0.8f*sm + rollSpd); if(swayPhase>6.283f)swayPhase-=6.283f;
   
   for(int i=0;i<STAFF_LENGTH;i++){
-    float d=fabs((float)i-ci)/(float)ci;
+    float d=fabs((float)i-ci)/((float)STAFF_LENGTH*0.5f);
     if(d>0.3f){
       uint8_t stemVal=(uint8_t)((d-0.3f)*200);
       leds[HEAD_LENGTH+i]=CHSV(90,220,stemVal);
@@ -222,7 +317,18 @@ void renderSpaceRocketEffect(float dt) {
   static uint32_t lastLaunch=0;
   uint32_t now=millis();
   float sm=globalSpeed/128.0f;
-  int ci=STAFF_LENGTH/2;
+  float ty = mpu_ready ? clampf(accel[1], -1.0f, 1.0f) : 0.0f;
+  static float lastAccelY9 = 0;
+  float jerk = mpu_ready ? clampf((ty - lastAccelY9)*5.0f, -3.0f, 3.0f) : 0.0f;
+  lastAccelY9 = ty;
+  int ci = STAFF_LENGTH/2; // Rocket needs fixed center point to travel outward
+  float rollSpd = mpu_ready ? fabs(rollRate)*0.015f : 0.0f;
+  
+  if (fabs(jerk) > 1.5f) {
+     htState.headImpactIntensity = max(htState.headImpactIntensity, fabs(jerk)*0.8f);
+     htState.tailImpactIntensity = max(htState.tailImpactIntensity, fabs(jerk)*0.8f);
+     if((now-lastLaunch)>1000) lastLaunch = now - 3500; // Trigger launch
+  }
   
   fadeToBlackBy(leds+HEAD_LENGTH,STAFF_LENGTH,25);
   for(int i=0;i<STAFF_LENGTH;i++){
@@ -240,7 +346,7 @@ void renderSpaceRocketEffect(float dt) {
   }
   
   if(rocketDirection){
-    rocketPos+=dt*80*sm;
+    rocketPos+=dt*80*(sm + rollSpd);
     if(rocketPos>ci-5){
       rocketDirection=false;
     }
@@ -278,17 +384,27 @@ void renderPumpkinPatchEffect(float dt) {
   static uint8_t pumpkinPositions[8];
   static bool pumpkinsInit=false;
   float sm=globalSpeed/128.0f;
-  int ci=STAFF_LENGTH/2;
+  float ty = mpu_ready ? clampf(accel[1], -1.0f, 1.0f) : 0.0f;
+  static float lastAccelY10 = 0;
+  float jerk = mpu_ready ? clampf((ty - lastAccelY10)*5.0f, -3.0f, 3.0f) : 0.0f;
+  lastAccelY10 = ty;
+  int ci = STAFF_LENGTH/2; // Fixed pumpkins
+  float rollSpd = mpu_ready ? fabs(rollRate)*0.015f : 0.0f;
+  
+  if (fabs(jerk) > 1.5f) {
+     htState.headImpactIntensity = max(htState.headImpactIntensity, fabs(jerk)*0.8f);
+     htState.tailImpactIntensity = max(htState.tailImpactIntensity, fabs(jerk)*0.8f);
+  }
   
   if(!pumpkinsInit){
     for(int i=0;i<8;i++)pumpkinPositions[i]=ci-30+i*8+random(5);
     pumpkinsInit=true;
   }
   
-  glowPhase+=dt*1.2f*sm; if(glowPhase>6.283f)glowPhase-=6.283f;
+  glowPhase+=dt*(1.2f*sm + rollSpd*2.0f); if(glowPhase>6.283f)glowPhase-=6.283f;
   
   for(int i=0;i<STAFF_LENGTH;i++){
-    float d=fabs((float)i-ci)/(float)ci;
+    float d=fabs((float)i-ci)/((float)STAFF_LENGTH*0.5f);
     uint8_t val=(uint8_t)(30-d*10);
     leds[HEAD_LENGTH+i]=CHSV(80,200,val);
   }

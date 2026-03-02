@@ -1,76 +1,148 @@
 
-void renderNewtonsCradleEffect(float dt) {
-  static float ballPos[5];
-  static float ballVel[5];
-  static bool ncInit = false;
-  int ci = STAFF_LENGTH / 2;
-  if (!ncInit) {
-    ballPos[0] = ci - 20;
-    ballPos[1] = ci - 10;
-    ballPos[2] = ci;
-    ballPos[3] = ci + 10;
-    ballPos[4] = ci + 20;
-    for(int i=0; i<5; i++) ballVel[i] = 0.0f;
-    ballVel[0] = 30.0f;
-    ncInit = true;
+void render80sBlocksEffect(float dt) {
+  #define BK_N 4
+  struct Block { float pos, vel, size, impactFlash; uint8_t hue; };
+  static Block bk[BK_N];
+  static bool bkInit = false;
+
+  if (!bkInit) {
+    const uint8_t hues[BK_N]  = { 224, 128, 64, 20 };   // hot-pink, cyan, yellow, orange
+    const float   sizes[BK_N] = { 14.0f, 16.0f, 13.0f, 15.0f };
+    const float   vels[BK_N]  = { 40.0f, -38.0f, 32.0f, -44.0f };
+    for (int b = 0; b < BK_N; b++) {
+      bk[b].pos         = (float)STAFF_LENGTH * (0.1f + b * 0.27f);
+      bk[b].vel         = vels[b];
+      bk[b].size        = sizes[b];
+      bk[b].hue         = hues[b];
+      bk[b].impactFlash = 0.0f;
+    }
+    bkInit = true;
   }
-  float tiltForce = mpu_ready ? clampf(accel[1] * 20.0f, -15.0f, 15.0f) : 0.0f;
-  for (int b = 0; b < 5; b++) {
-    ballVel[b] += tiltForce * dt;
-    ballPos[b] += ballVel[b] * dt;
-    
-    if (ballPos[b] < 5) { 
-      ballPos[b] = 5; 
-      ballVel[b] = fabs(ballVel[b]) * 0.9f; 
-      htState.headImpactIntensity = min(1.0f, fabs(ballVel[b])/30.0f);
+
+  static float lastAccelYBK = 0.0f;
+  float accelYBK = mpu_ready ? clampf(accel[1] * 0.8f, -1.2f, 1.2f) : 0.0f;
+  float jerkBK   = clampf((accelYBK - lastAccelYBK) * 5.0f, -3.0f, 3.0f);
+  lastAccelYBK   = accelYBK;
+
+  float tiltPush = mpu_ready ? accelYBK * 100.0f + jerkBK * 80.0f : 0.0f;
+
+  // Big jerk: scatter blocks in opposite directions for maximum collisions
+  if (fabs(jerkBK) > 1.8f) {
+    for (int b = 0; b < BK_N; b++)
+      bk[b].vel += jerkBK * (b % 2 == 0 ? 1.0f : -1.0f) * 25.0f;
+    htState.headImpactIntensity = min(1.5f, fabs(jerkBK) * 0.4f);
+    htState.tailImpactIntensity = min(1.5f, fabs(jerkBK) * 0.4f);
+  }
+
+  // Physics update
+  for (int b = 0; b < BK_N; b++) {
+    bk[b].vel  += tiltPush * dt;
+    bk[b].vel  *= (1.0f - dt * 0.15f);              // light air friction
+    bk[b].vel   = clampf(bk[b].vel, -220.0f, 220.0f);
+    bk[b].pos  += bk[b].vel * dt;
+    bk[b].impactFlash = max(0.0f, bk[b].impactFlash - dt * 5.0f);
+
+    float half = bk[b].size * 0.5f;
+    if (bk[b].pos - half < 0.0f) {
+      bk[b].pos = half;
+      if (bk[b].vel < 0.0f) {
+        float spd = fabs(bk[b].vel);
+        htState.headImpactIntensity = min(1.5f, spd / 80.0f);
+        bk[b].impactFlash = clampf(spd / 100.0f, 0.3f, 1.0f);
+        bk[b].vel = spd * 0.85f;
+      }
     }
-    if (ballPos[b] > STAFF_LENGTH-5) { 
-      ballPos[b] = STAFF_LENGTH-5; 
-      ballVel[b] = -fabs(ballVel[b]) * 0.9f; 
-      htState.tailImpactIntensity = min(1.0f, fabs(ballVel[b])/30.0f);
-    }
-    
-    ballVel[b] *= 0.998f;
-    
-    for (int b2 = b+1; b2 < 5; b2++) {
-      float dist = fabs(ballPos[b] - ballPos[b2]);
-      if (dist < 3.0f) {
-        float tmp = ballVel[b]; 
-        ballVel[b] = ballVel[b2] * 0.95f; 
-        ballVel[b2] = tmp * 0.95f;
+    if (bk[b].pos + half > (float)(STAFF_LENGTH - 1)) {
+      bk[b].pos = (float)(STAFF_LENGTH - 1) - half;
+      if (bk[b].vel > 0.0f) {
+        float spd = fabs(bk[b].vel);
+        htState.tailImpactIntensity = min(1.5f, spd / 80.0f);
+        bk[b].impactFlash = clampf(spd / 100.0f, 0.3f, 1.0f);
+        bk[b].vel = -spd * 0.85f;
       }
     }
   }
-  fadeToBlackBy(leds+HEAD_LENGTH, STAFF_LENGTH, 50);
-  
-  for(int i=0; i<STAFF_LENGTH; i++){
-    float d = fabs((float)i - ci)/(float)ci;
-    leds[HEAD_LENGTH+i] = CHSV(200, 80, (uint8_t)(20 - d*15));
-  }
-  
-  for (int b = 0; b < 5; b++) {
-    int idx = (int)ballPos[b];
-    if(idx >= 0 && idx < STAFF_LENGTH){
-      float spd = fabs(ballVel[b]);
-      uint8_t bHue = 180 + b * 20;
-      uint8_t bVal = 180 + (uint8_t)(min(spd, 30.0f) * 2.5f);
-      
-      leds[HEAD_LENGTH + idx] = CHSV(bHue, 220, bVal);
-      if(idx > 0) leds[HEAD_LENGTH + idx - 1] += CHSV(bHue, 200, bVal/3);
-      if(idx < STAFF_LENGTH-1) leds[HEAD_LENGTH + idx + 1] += CHSV(bHue, 200, bVal/3);
+
+  // Block-block collisions — elastic swap with damping
+  for (int a = 0; a < BK_N; a++) {
+    for (int b = a + 1; b < BK_N; b++) {
+      float minGap = (bk[a].size + bk[b].size) * 0.5f;
+      float delta  = bk[b].pos - bk[a].pos;
+      if (fabs(delta) < minGap && fabs(delta) > 0.01f) {
+        float push = (minGap - fabs(delta)) * 0.5f;
+        float dir  = (delta > 0.0f) ? 1.0f : -1.0f;
+        bk[a].pos -= dir * push;
+        bk[b].pos += dir * push;
+        float va = bk[a].vel, vb = bk[b].vel;
+        bk[a].vel  = vb * 0.9f;
+        bk[b].vel  = va * 0.9f;
+        float relSpd = fabs(va - vb);
+        float fl = clampf(relSpd / 80.0f, 0.2f, 1.0f);
+        bk[a].impactFlash = max(bk[a].impactFlash, fl);
+        bk[b].impactFlash = max(bk[b].impactFlash, fl);
+      }
     }
   }
-  finishEffect(dt,0.5f,0.3f, 190,200,200, 210,200,200);
+
+  // Render — solid blocks on black background
+  for (int i = 0; i < STAFF_LENGTH; i++) leds[HEAD_LENGTH + i] = CRGB::Black;
+  for (int b = 0; b < BK_N; b++) {
+    int center = (int)bk[b].pos;
+    int half   = (int)(bk[b].size * 0.5f);
+    for (int i = center - half; i <= center + half; i++) {
+      if (i < 0 || i >= STAFF_LENGTH) continue;
+      float edge = 1.0f - fabs((float)(i - center)) / (float)(half + 1) * 0.2f;
+      leds[HEAD_LENGTH + i] = CHSV(bk[b].hue, 255, (uint8_t)(215.0f * edge));
+    }
+    // Impact flash: whole block brightens + white edge burst
+    if (bk[b].impactFlash > 0.05f) {
+      uint8_t fv = (uint8_t)(bk[b].impactFlash * 220.0f);
+      for (int i = center - half; i <= center + half; i++) {
+        if (i >= 0 && i < STAFF_LENGTH) leds[HEAD_LENGTH + i] += CHSV(0, 0, fv / 2);
+      }
+      for (int e = -3; e <= 3; e++) {
+        float ef = 1.0f - fabs((float)e) / 4.0f;
+        uint8_t ev = (uint8_t)(fv * ef);
+        int ie1 = center - half + e, ie2 = center + half + e;
+        if (ie1 >= 0 && ie1 < STAFF_LENGTH) leds[HEAD_LENGTH + ie1] += CHSV(0, 0, ev);
+        if (ie2 >= 0 && ie2 < STAFF_LENGTH) leds[HEAD_LENGTH + ie2] += CHSV(0, 0, ev);
+      }
+    }
+  }
+
+  // Head/tail color: nearest block to each end
+  float hDist = (float)STAFF_LENGTH, tDist = (float)STAFF_LENGTH;
+  uint8_t hHue = bk[0].hue, tHue = bk[0].hue;
+  for (int b = 0; b < BK_N; b++) {
+    if (bk[b].pos < hDist)                       { hDist = bk[b].pos;                       hHue = bk[b].hue; }
+    if ((float)STAFF_LENGTH - bk[b].pos < tDist) { tDist = (float)STAFF_LENGTH - bk[b].pos; tHue = bk[b].hue; }
+  }
+  if (!customColorMode) { headHue = hHue; headSat = 255; headVal = 220; tailHue = tHue; tailSat = 255; tailVal = 220; }
+  updateHeadTailReactivity(dt, 0.5f, accelYBK * 0.15f);
+  renderHeadAndTail();
+
+  // Roll: rainbow scan across all blocks at spin speed
+  if (mpu_ready && fabs(rollRate) > 55.0f) {
+    float str = clampf((fabs(rollRate) - 55.0f) / 145.0f, 0.0f, 1.0f);
+    for (int i = 0; i < STAFF_LENGTH; i++) {
+      uint8_t h = (uint8_t)(fmod((float)i * 1.8f + vortexPhase * 90.0f, 256.0f));
+      leds[HEAD_LENGTH + i] = blend(leds[HEAD_LENGTH + i], CHSV(h, 255, 255), (uint8_t)(str * 160));
+    }
+  }
+  applyRollGlow(224, 255);   // hot-pink spin glow
 }
 void renderSlinkyEffect(float dt) {
   static float slinkyPhase = 0.0f;
   static float compression = 0.5f;
   uint32_t now = millis();
   int ci = STAFF_LENGTH / 2;
-  float tilt = mpu_ready ? clampf(accel[1] * 0.8f, -1.0f, 1.0f) : sin(now * 0.001f) * 0.5f;
-  slinkyPhase += dt * (1.5f + fabs(tilt) * 3.0f);
-  if(slinkyPhase > 6.283f) slinkyPhase -= 6.283f;
-  compression = compression * 0.95f + tilt * 0.05f;
+  static float lastAccelYSL=0.0f;
+  float accelYSL=mpu_ready?clampf(accel[1]*0.8f,-1.2f,1.2f):0.0f;
+  float jerkSL=clampf((accelYSL-lastAccelYSL)*5.0f,-3.0f,3.0f); lastAccelYSL=accelYSL;
+  float tilt=mpu_ready?accelYSL:sin(now*0.001f)*0.5f;
+  slinkyPhase+=dt*(2.0f+fabs(tilt)*5.0f+fabs(jerkSL)*4.0f);
+  if(slinkyPhase>6.283f) slinkyPhase-=6.283f;
+  compression=compression*0.88f+(tilt+jerkSL*0.3f)*0.12f;
   for (int i = 0; i < STAFF_LENGTH; i++) {
     float pos = (float)i / STAFF_LENGTH;
     float wave = sin(pos * 20.0f - slinkyPhase + compression * 5.0f) * 0.5f + 0.5f;
@@ -80,11 +152,21 @@ void renderSlinkyEffect(float dt) {
     uint8_t val = (uint8_t)((wave * wave2) * 220);
     leds[HEAD_LENGTH + i] = CHSV(hue, sat, val);
   }
-  if (mpu_ready && fabs(tilt) > 0.6f) {
-    htState.headImpactIntensity = max(htState.headImpactIntensity, fabs(tilt) * 0.8f);
-    htState.tailImpactIntensity = max(htState.tailImpactIntensity, fabs(tilt) * 0.8f);
+  if (mpu_ready) {
+    float impSL=clampf(fabs(accelYSL)*0.8f+fabs(jerkSL)*0.5f,0.0f,1.5f);
+    if(impSL>0.4f){htState.headImpactIntensity=max(htState.headImpactIntensity,impSL);htState.tailImpactIntensity=max(htState.tailImpactIntensity,impSL);}
   }
-  finishEffect(dt, 0.5f, tilt * 0.2f);
+  finishEffect(dt, 0.5f, accelYSL * 0.2f);
+  if (mpu_ready && fabs(rollRate) > 55.0f) {
+    // Compression ripple: tight rapid waves like a slinky being shaken fast
+    float str = clampf((fabs(rollRate)-55.0f)/145.0f, 0.0f, 1.0f);
+    for (int i = 0; i < STAFF_LENGTH; i++) {
+      float pos = (float)i/(float)(STAFF_LENGTH-1);
+      float wave = sin(pos*25.13f + vortexPhase*5.0f)*0.5f+0.5f; wave*=wave*str;
+      leds[HEAD_LENGTH+i] += CHSV(155, 200, (uint8_t)(wave*190));
+    }
+  }
+  applyRollGlow(155, 200);   // spring green-cyan coil when spinning
 }
 void renderInkDropEffect(float dt) {
   #define MAX_IDROPS 5
@@ -96,7 +178,7 @@ void renderInkDropEffect(float dt) {
   static float   armExt[2]={0,0}, armVel[2]={0,0};
   static bool    armDriven[2]={false,false};
   static float   blobFizzle=0, fizzleH=0, fizzleT=0, blobPulse=0;
-  static uint8_t impactHue=200, dropHue=0;
+  static uint8_t impactHue=200, dropHue=0, headImpactHue=200, tailImpactHue=200;
   static bool    inkInit=false;
   static float   spawnT=0, resetT=0;
   if (!inkInit) { memset(drops,0,sizeof(drops)); memset(splats,0,sizeof(splats)); inkInit=true; }
@@ -115,6 +197,9 @@ void renderInkDropEffect(float dt) {
   int ci = STAFF_LENGTH/2;
   float swing  = mpu_ready ? clampf(sqrt(gyro[0]*gyro[0]+gyro[1]*gyro[1]+gyro[2]*gyro[2])/200.0f,0,1) : 0;
   float impact = mpu_ready ? clampf((sqrt(accel[0]*accel[0]+accel[1]*accel[1]+accel[2]*accel[2])-1.0f)*0.5f,0,1) : 0;
+  static float lastAccelYID=0.0f;
+  float accelYID=mpu_ready?clampf(accel[1]*0.8f,-1.2f,1.2f):0.0f;
+  float jerkID=clampf((accelYID-lastAccelYID)*5.0f,-3.0f,3.0f); lastAccelYID=accelYID;
   float tilt   = mpu_ready ? clampf(accel[1],-1.5f,1.5f) : 0;
   blobPulse   += dt*2.5f;
   if (blobPulse > 628.0f) blobPulse -= 628.0f;  // wrap at 100*2π
@@ -127,6 +212,11 @@ void renderInkDropEffect(float dt) {
     toSpawn=3;
     htState.headImpactIntensity=max(htState.headImpactIntensity,impact);
     htState.tailImpactIntensity=max(htState.tailImpactIntensity,impact);
+  }
+  // Strong jerk shakes ink loose: burst of extra drops + immediate fizzle
+  if (fabs(jerkID) > 1.0f) {
+    toSpawn+=2;
+    blobFizzle=max(blobFizzle,fabs(jerkID)*0.4f);
   }
   for (int n=0; n<toSpawn; n++) {
     for (int i=0; i<MAX_IDROPS; i++) {
@@ -208,8 +298,8 @@ void renderInkDropEffect(float dt) {
           splats[k].active=true; break;
         }
       }
-      if (hp<STAFF_LENGTH/2) htState.headImpactIntensity=max(htState.headImpactIntensity,0.9f);
-      else                   htState.tailImpactIntensity=max(htState.tailImpactIntensity,0.9f);
+      if (hp<STAFF_LENGTH/2) { htState.headImpactIntensity=max(htState.headImpactIntensity,0.9f); headImpactHue=impactHue; }
+      else                   { htState.tailImpactIntensity=max(htState.tailImpactIntensity,0.9f); tailImpactHue=impactHue; }
     }
   }
 
@@ -269,18 +359,18 @@ void renderInkDropEffect(float dt) {
     }
   }
 
-  // Head/tail fizzle — random sparks at the end that was hit
+  // Head/tail fizzle — sparks use the hue of the drop that hit THAT specific end
   if (fizzleH>0.05f) {
     int fLen=(int)(fizzleH*28);
     for (int i=0;i<fLen&&i<STAFF_LENGTH;i++)
       if (random(100)<(int)(fizzleH*70))
-        leds[HEAD_LENGTH+i]+=CHSV(impactHue,200,(uint8_t)(fizzleH*220));
+        leds[HEAD_LENGTH+i]+=CHSV(headImpactHue,220,(uint8_t)(fizzleH*220));
   }
   if (fizzleT>0.05f) {
     int fLen=(int)(fizzleT*28);
     for (int i=0;i<fLen&&i<STAFF_LENGTH;i++)
       if (random(100)<(int)(fizzleT*70))
-        leds[HEAD_LENGTH+STAFF_LENGTH-1-i]+=CHSV(impactHue,200,(uint8_t)(fizzleT*220));
+        leds[HEAD_LENGTH+STAFF_LENGTH-1-i]+=CHSV(tailImpactHue,220,(uint8_t)(fizzleT*220));
   }
 
   // Splatters — single LEDs fading with life²
@@ -302,7 +392,28 @@ void renderInkDropEffect(float dt) {
     if (t2>=0&&t2<STAFF_LENGTH) leds[HEAD_LENGTH+t2]+=CHSV(drops[i].hue,230,70);
   }
 
+  // Head and tail flowers mirror the ink colour that splashed at each end.
+  // Brightness is proportional to fizzle intensity so they fade in sync with the staff sparks.
+  float hFizz = clampf(fizzleH, 0.0f, 1.0f);
+  float tFizz = clampf(fizzleT, 0.0f, 1.0f);
+  if (!customColorMode) {
+    headHue = headImpactHue;  headSat = (uint8_t)(180 + hFizz*75);  headVal = (uint8_t)(55 + hFizz*200);
+    tailHue = tailImpactHue;  tailSat = (uint8_t)(180 + tFizz*75);  tailVal = (uint8_t)(55 + tFizz*200);
+  }
   finishEffect(dt,0.5f,0.0f);
+  if (mpu_ready && fabs(rollRate) > 55.0f) {
+    // Ink rings: two concentric rings expand from center like ink dropped in water
+    float str = clampf((fabs(rollRate)-55.0f)/145.0f, 0.0f, 1.0f);
+    int ci = STAFF_LENGTH/2;
+    for (int r = 0; r < 2; r++) {
+      float ring = fmod(vortexPhase*0.8f + r*0.5f, 1.0f) * (float)(STAFF_LENGTH/2);
+      for (int i = 0; i < STAFF_LENGTH; i++) {
+        float d = fabs(fabs((float)i-ci) - ring);
+        if (d < 4.5f) { float f=(1.0f-d/4.5f)*str; leds[HEAD_LENGTH+i]+=CHSV(210,220,(uint8_t)(f*210)); }
+      }
+    }
+  }
+  applyRollGlow(210, 200);   // purple-blue ink swirl when spinning
 }
 void renderRippleTankEffect(float dt) {
   #define RT_SOURCES 4
@@ -314,11 +425,21 @@ void renderRippleTankEffect(float dt) {
     rtPhase[s] += dt * rtFreq[s];
     if (rtPhase[s] > 6.283f) rtPhase[s] -= 6.283f;
   }
-  if (mpu_ready) {
-    float tilt = clampf(accel[1] * 0.1f, -0.15f, 0.15f);
-    for (int s = 0; s < RT_SOURCES; s++) {
-      rtPos[s] = clampf(rtPos[s] + tilt * dt, 0.05f, 0.95f);
+  {
+    static float lastAccelYRT=0.0f;
+    float accelYRT=mpu_ready?clampf(accel[1]*0.8f,-1.2f,1.2f):0.0f;
+    float jerkRT=clampf((accelYRT-lastAccelYRT)*5.0f,-3.0f,3.0f); lastAccelYRT=accelYRT;
+    if (mpu_ready) {
+      for (int s = 0; s < RT_SOURCES; s++) {
+        // Strong tilt sweeps sources; jerk snaps them dramatically (alternating directions)
+        rtPos[s]=clampf(rtPos[s]+accelYRT*0.5f*dt+jerkRT*0.04f*(s%2==0?1:-1),0.05f,0.95f);
+        // Jerk spikes frequency for a visible ripple burst
+        if(fabs(jerkRT)>0.5f) rtFreq[s]=clampf(rtFreq[s]+fabs(jerkRT)*3.0f*dt,rtFreq[s],15.0f);
+      }
     }
+    // Freq decays back toward base values (~0.5 s time constant)
+    const float baseF[RT_SOURCES]={3.0f,4.5f,3.8f,5.2f};
+    for (int s=0;s<RT_SOURCES;s++) rtFreq[s]=rtFreq[s]*0.98f+baseF[s]*0.02f;
   }
   for (int i = 0; i < STAFF_LENGTH; i++) {
     float pos = (float)i / STAFF_LENGTH;
@@ -335,6 +456,18 @@ void renderRippleTankEffect(float dt) {
     leds[HEAD_LENGTH + i] = CHSV(hue, sat, val);
   }
   finishEffect(dt, 0.5f, 0.0f);
+  if (mpu_ready && fabs(rollRate) > 55.0f) {
+    // Interference burst: two counter-propagating waves produce rapid beat pattern
+    float str = clampf((fabs(rollRate)-55.0f)/145.0f, 0.0f, 1.0f);
+    for (int i = 0; i < STAFF_LENGTH; i++) {
+      float pos = (float)i/(float)STAFF_LENGTH;
+      float w1 = sin(pos*25.13f + vortexPhase*5.0f)*0.5f+0.5f;
+      float w2 = sin(pos*18.85f - vortexPhase*3.5f)*0.5f+0.5f;
+      float inter = w1*w2*str;
+      leds[HEAD_LENGTH+i] += CHSV(160, 220, (uint8_t)(inter*200));
+    }
+  }
+  applyRollGlow(160, 220);   // teal wave surge when spinning
 }
 void renderSupernovaEffect(float dt) {
   static float novaPhase   = 0.0f;
@@ -353,13 +486,27 @@ void renderSupernovaEffect(float dt) {
     novaIntensity = novaRadius * 0.5f;
     if (novaRadius >= 0.6f) { expanding = true; novaRadius = 0.0f; novaIntensity = 1.0f; htState.headImpactIntensity = 1.5f; htState.tailImpactIntensity = 1.5f; }
   }
-  if (mpu_ready) novaPhase += accel[1] * dt * 3.0f;
+  {
+    static float lastAccelYSN=0.0f;
+    float accelYSN=mpu_ready?clampf(accel[1]*0.8f,-1.2f,1.2f):0.0f;
+    float jerkSN=clampf((accelYSN-lastAccelYSN)*5.0f,-3.0f,3.0f); lastAccelYSN=accelYSN;
+    if (mpu_ready) {
+      novaPhase+=(accelYSN*10.0f+jerkSN*6.0f)*dt;
+      // Strong jerk triggers immediate nova burst
+      if(fabs(jerkSN)>1.5f){expanding=true;novaRadius=0.0f;novaIntensity=1.0f;htState.headImpactIntensity=1.5f;htState.tailImpactIntensity=1.5f;}
+    }
+  }
   if(novaPhase > 6.283f) novaPhase -= 6.283f;
   if(novaPhase < -6.283f) novaPhase += 6.283f;
   for (int i = 0; i < STAFF_LENGTH; i++) {
-    float pos = (float)i / STAFF_LENGTH;
-    float nebula = sin(pos * 12 + novaPhase) * 0.3f + 0.3f;
-    leds[HEAD_LENGTH + i] = CHSV(200 + (uint8_t)(nebula * 40), 220, (uint8_t)(nebula * 50));
+    float pos    = (float)i / STAFF_LENGTH;
+    float dist   = fabs(pos - 0.5f) * 2.0f;                  // 0=center, 1=edge
+    float nebula = sin(pos * 12 + novaPhase) * 0.3f + 0.7f;  // much brighter base
+    float corona = (1.0f - dist * dist) * (expanding ? 0.65f : 0.9f);
+    float ripple = sin(pos * 22 + novaPhase * 1.6f) * 0.12f + 0.88f;
+    uint8_t h    = expanding ? (uint8_t)(20 + dist * 10) : (uint8_t)(15 + dist * 12);
+    uint8_t v    = (uint8_t)min(255.0f, nebula * 110.0f + corona * 145.0f * ripple);
+    leds[HEAD_LENGTH + i] = CHSV(h, 230, v);
   }
   for (int i = 0; i < STAFF_LENGTH; i++) {
     float distFromCenter = fabs((float)i - ci) / (float)ci;
@@ -372,6 +519,19 @@ void renderSupernovaEffect(float dt) {
     }
   }
   finishEffect(dt, 0.5f, 0.0f);
+  if (mpu_ready && fabs(rollRate) > 55.0f) {
+    // Nova rings: three rapid expanding shells of orange-yellow light from center
+    float str = clampf((fabs(rollRate)-55.0f)/145.0f, 0.0f, 1.0f);
+    int ci = STAFF_LENGTH/2;
+    for (int r = 0; r < 3; r++) {
+      float ring = fmod(vortexPhase*1.1f + (float)r/3.0f, 1.0f) * (float)(STAFF_LENGTH/2);
+      for (int i = 0; i < STAFF_LENGTH; i++) {
+        float d = fabs(fabs((float)i-ci) - ring);
+        if (d < 5.0f) { float f=(1.0f-d/5.0f)*str; uint8_t h=30-(uint8_t)(ring/(STAFF_LENGTH/2)*15); leds[HEAD_LENGTH+i]+=CHSV(h,255,(uint8_t)(f*230)); }
+      }
+    }
+  }
+  applyRollGlow(25, 255);    // orange nova burst when spinning
 }
 void renderBioluminescenceEffect(float dt) {
   #define MAX_BIO 20
@@ -388,11 +548,24 @@ void renderBioluminescenceEffect(float dt) {
     }
     bioInit = true;
   }
-  float tilt = mpu_ready ? clampf(accel[1] * 0.3f, -0.5f, 0.5f) : 0.0f;
+  static float bioFizzle = 0.0f;
+  static float planktonFlash  = 0.0f;  // white flash intensity on jerk
+  static float bioJerkStrobe  = 0.0f;  // head/tail strobe trigger, longer-lived
+  static float bioStrobePhase = 0.0f;  // 0-1 cycles at ~10 Hz for white/purple alternation
+  static float lastAccelYBL=0.0f;
+  float accelYBL=mpu_ready?clampf(accel[1]*0.8f,-1.2f,1.2f):0.0f;
+  float jerkBL=clampf((accelYBL-lastAccelYBL)*5.0f,-3.0f,3.0f); lastAccelYBL=accelYBL;
+  float tilt = mpu_ready ? accelYBL : 0.0f;
+  if (fabs(jerkBL) > 1.0f) {
+    bioFizzle     = max(bioFizzle,     fabs(jerkBL) * 0.55f);
+    planktonFlash = max(planktonFlash, fabs(jerkBL) * 0.8f);
+    bioJerkStrobe = max(bioJerkStrobe, fabs(jerkBL) * 0.9f);
+  }
   for (int i = 0; i < MAX_BIO; i++) {
-    bioPhase[i] += dt * (1.0f + random(10) / 10.0f);
+    bioPhase[i] += dt * (1.5f + random(10) / 10.0f + fabs(jerkBL)*2.0f);
     if (bioPhase[i] > 6.283f) bioPhase[i] -= 6.283f;
-    bioPos[i] += (bioSpeed[i] + tilt) * dt;
+    if (fabs(jerkBL) > 1.0f) bioPhase[i] = 1.5708f;  // snap all to peak brightness on jerk
+    bioPos[i] += (bioSpeed[i] + tilt*0.4f) * dt;
     if (bioPos[i] < 0.0f) bioPos[i] = 1.0f;
     if (bioPos[i] > 1.0f) bioPos[i] = 0.0f;
     bioBright[i] = (sin(bioPhase[i]) * 0.5f + 0.5f);
@@ -415,11 +588,59 @@ void renderBioluminescenceEffect(float dt) {
       }
     }
   }
-  if (mpu_ready && fabs(accel[1]) > 0.5f) {
-    htState.headImpactIntensity = max(htState.headImpactIntensity, clampf(fabs(accel[1]) * 0.5f, 0.0f, 1.0f));
-    htState.tailImpactIntensity = max(htState.tailImpactIntensity, clampf(fabs(accel[1]) * 0.5f, 0.0f, 1.0f));
+  // Bio fizzle — each bright organism emits sparks on jerk, like ink drop fizzle
+  if (bioFizzle > 0.05f) {
+    for (int i = 0; i < MAX_BIO; i++) {
+      if (bioBright[i] < 0.3f) continue;
+      int center = HEAD_LENGTH + (int)(bioPos[i] * (STAFF_LENGTH - 1));
+      for (int s = -8; s <= 8; s++) {
+        int si = center + s;
+        if (si < HEAD_LENGTH || si >= HEAD_LENGTH + STAFF_LENGTH) continue;
+        if (random(100) < (int)(bioFizzle * bioBright[i] * 65))
+          leds[si] += CHSV(140 + (uint8_t)(bioBright[i] * 40), 180, (uint8_t)(bioFizzle * bioBright[i] * 210));
+      }
+    }
+    bioFizzle = max(0.0f, bioFizzle - dt * 2.5f);
+  }
+  // Plankton flash — white sparkling eruption across the whole staff on jerk
+  if (planktonFlash > 0.05f) {
+    for (int i = 0; i < STAFF_LENGTH; i++) {
+      if (random(100) < (int)(planktonFlash * 65))
+        leds[HEAD_LENGTH + i] += CHSV(180, (uint8_t)random(35), (uint8_t)(planktonFlash * 210));
+    }
+  }
+  planktonFlash = max(0.0f, planktonFlash - dt * 3.0f);
+  bioJerkStrobe = max(0.0f, bioJerkStrobe - dt * 1.5f);
+  bioStrobePhase += dt * 10.0f;
+  if (bioStrobePhase >= 1.0f) bioStrobePhase -= 1.0f;
+  if (mpu_ready) {
+    float impBL=clampf(fabs(accelYBL)*0.8f+fabs(jerkBL)*0.5f,0.0f,1.5f);
+    if(impBL>0.3f){htState.headImpactIntensity=max(htState.headImpactIntensity,impBL);htState.tailImpactIntensity=max(htState.tailImpactIntensity,impBL);}
   }
   finishEffect(dt, 0.5f, 0.0f);
+  // White/purple strobe on head and tail during jerk disturbance
+  if (bioJerkStrobe > 0.05f) {
+    CRGB sc = (bioStrobePhase < 0.5f) ? CRGB(CRGB::White) : CRGB(CHSV(200, 255, 255));
+    uint8_t ba = (uint8_t)(bioJerkStrobe * 210.0f);
+    for (int i = 0; i < HEAD_LENGTH; i++)
+      leds[i] = blend(leds[i], sc, ba);
+    for (int hi = 0; hi < HEAD_LENGTH; hi++) {
+      int t1 = TAIL_START + TAIL_OFFSET + hi*2;
+      int t2 = t1 + 1;
+      if (t1 < NUM_LEDS) leds[t1] = blend(leds[t1], sc, ba);
+      if (t2 < NUM_LEDS) leds[t2] = blend(leds[t2], sc, ba);
+    }
+  }
+  if (mpu_ready && fabs(rollRate) > 55.0f) {
+    // Bio bloom wave: slow sinusoidal glow sweeps the whole staff like a bloom pulse
+    float str = clampf((fabs(rollRate)-55.0f)/145.0f, 0.0f, 1.0f);
+    for (int i = 0; i < STAFF_LENGTH; i++) {
+      float pos = (float)i/(float)(STAFF_LENGTH-1);
+      float bloom = sin(pos*9.42f + vortexPhase*2.5f)*0.5f+0.5f; bloom*=bloom*str;
+      leds[HEAD_LENGTH+i] += CHSV(148, 180, (uint8_t)(bloom*165));
+    }
+  }
+  applyRollGlow(148, 220);   // teal bioluminescence bloom when spinning
 }
 void renderPlasmaWavesEffect(float dt) {
   static float phase1 = 0, phase2 = 0, phase3 = 0;
@@ -447,43 +668,71 @@ void renderPlasmaWavesEffect(float dt) {
 }
 void renderElectronOrbitEffect(float dt) {
   static float electronAngle[3] = {0, 2.09f, 4.19f};
-  static float orbitSpeed[3] = {2.0f, 1.5f, 2.5f};
+  static float orbitSpeed[3]    = {2.0f, 1.5f, 2.5f};
+  static float eoNebPhase       = 0.0f;
   float sm = globalSpeed / 128.0f;
   int ci = STAFF_LENGTH / 2;
-  
+
+  eoNebPhase += dt * 0.35f; if (eoNebPhase > 6.2832f) eoNebPhase -= 6.2832f;
+
+  // Fade electron trails
   fadeToBlackBy(leds + HEAD_LENGTH, STAFF_LENGTH, 40);
-  
-  for(int i = -3; i <= 3; i++){
+
+  // Murky dark purple background — slow undulating nebula across full strip
+  for (int i = 0; i < STAFF_LENGTH; i++) {
+    float p = (float)i / STAFF_LENGTH;
+    float n = sin(p * 9.0f + eoNebPhase) * 0.35f
+            + sin(p * 3.5f - eoNebPhase * 0.6f) * 0.40f + 0.55f;
+    if (n < 0.0f) n = 0.0f; if (n > 1.0f) n = 1.0f;
+    leds[HEAD_LENGTH + i] += CHSV((uint8_t)(198 + (uint8_t)(n * 22)), 235, (uint8_t)(n * 110 + 40));
+  }
+
+  // Center nucleus — 5x bigger (±17 LEDs, was ±3), soft quadratic falloff
+  for (int i = -17; i <= 17; i++) {
     int idx = ci + i;
-    if(idx >= 0 && idx < STAFF_LENGTH){
-      uint8_t val = (uint8_t)(200 - abs(i) * 30);
-      leds[HEAD_LENGTH + idx] = CHSV(60, 255, val);
-    }
+    if (idx < 0 || idx >= STAFF_LENGTH) continue;
+    float d = fabs((float)i) / 17.0f;
+    float f = 1.0f - d * d;
+    leds[HEAD_LENGTH + idx] += CHSV(60, 200, (uint8_t)(f * f * 235));
   }
-  
-  for(int e = 0; e < 3; e++){
+
+  // Electrons — 2x orbit distance (40/56/72 was 20/28/36), wider glow ±4 LEDs
+  for (int e = 0; e < 3; e++) {
     electronAngle[e] += dt * orbitSpeed[e] * sm;
-    if(electronAngle[e] > 6.283f) electronAngle[e] -= 6.283f;
-    
-    float orbitRadius = 20 + e * 8;
+    if (electronAngle[e] > 6.283f) electronAngle[e] -= 6.283f;
+
+    float orbitRadius = (20.0f + e * 8.0f) * 2.0f;  // 40, 56, 72
     int pos = ci + (int)(sin(electronAngle[e]) * orbitRadius);
-    
-    if(pos >= 0 && pos < STAFF_LENGTH){
-      uint8_t hue = 160 + e * 30;
-      leds[HEAD_LENGTH + pos] = CHSV(hue, 255, 255);
-      if(pos > 0) leds[HEAD_LENGTH + pos - 1] += CHSV(hue, 220, 100);
-      if(pos < STAFF_LENGTH - 1) leds[HEAD_LENGTH + pos + 1] += CHSV(hue, 220, 100);
+    uint8_t hue = 160 + e * 30;
+
+    for (int w = -4; w <= 4; w++) {
+      int widx = pos + w;
+      if (widx < 0 || widx >= STAFF_LENGTH) continue;
+      float fd = fabs((float)w) / 5.0f;
+      float f  = 1.0f - fd * fd;
+      leds[HEAD_LENGTH + widx] += CHSV(hue, (w == 0) ? 255 : 220, (uint8_t)(f * (w == 0 ? 255 : 160)));
     }
   }
-  
-  finishEffect(dt,0.7f,0, 60,255,220, 60,255,220);
+
+  finishEffect(dt, 0.7f, 0, 60, 255, 220, 60, 255, 220);
 }
 void renderDNAHelixEffect(float dt) {
   static float helixPhase = 0;
   float sm = globalSpeed / 128.0f;
-  int ci = STAFF_LENGTH / 2;
+  float ty = mpu_ready ? clampf(accel[1], -1.0f, 1.0f) : 0.0f;
+  static float lastAccelYDNA = 0.0f;
+  float jerk = mpu_ready ? clampf((ty - lastAccelYDNA)*5.0f, -3.0f, 3.0f) : 0.0f;
+  lastAccelYDNA = ty;
+  int ci = STAFF_LENGTH / 2 + (int)(ty * (STAFF_LENGTH/2.5f));
+  ci = constrain(ci, 4, STAFF_LENGTH-5);
+  float rollSpd = mpu_ready ? fabs(rollRate)*0.015f : 0.0f;
   
-  helixPhase += dt * 3.0f * sm; if(helixPhase > 6.283f) helixPhase -= 6.283f;
+  if (fabs(jerk) > 1.5f) {
+     htState.headImpactIntensity = max(htState.headImpactIntensity, fabs(jerk)*0.8f);
+     htState.tailImpactIntensity = max(htState.tailImpactIntensity, fabs(jerk)*0.8f);
+  }
+  
+  helixPhase += dt * (3.0f * sm + rollSpd*2.0f); if(helixPhase > 6.283f) helixPhase -= 6.283f;
   
   fadeToBlackBy(leds + HEAD_LENGTH, STAFF_LENGTH, 30);
   
@@ -563,8 +812,20 @@ void renderMeteorShowerEffect(float dt) {
 }
 void renderMagneticPullEffect(float dt) {
   static float pullPhase = 0;
-  int ci = STAFF_LENGTH / 2;
-  pullPhase += dt * (globalSpeed / 64.0f);
+  float ty = mpu_ready ? clampf(accel[1], -1.0f, 1.0f) : 0.0f;
+  static float lastAccelYMP = 0.0f;
+  float jerk = mpu_ready ? clampf((ty - lastAccelYMP)*5.0f, -3.0f, 3.0f) : 0.0f;
+  lastAccelYMP = ty;
+  int ci = STAFF_LENGTH / 2 + (int)(ty * (STAFF_LENGTH/2.5f));
+  ci = constrain(ci, 4, STAFF_LENGTH-5);
+  float rollSpd = mpu_ready ? fabs(rollRate)*0.015f : 0.0f;
+  
+  if (fabs(jerk) > 1.5f) {
+     htState.headImpactIntensity = max(htState.headImpactIntensity, fabs(jerk)*0.8f);
+     htState.tailImpactIntensity = max(htState.tailImpactIntensity, fabs(jerk)*0.8f);
+  }
+  
+  pullPhase += dt * (globalSpeed / 64.0f + rollSpd);
   if(pullPhase >= 1.0f) pullPhase -= (float)(int)pullPhase;
 
   for(int i=0; i<STAFF_LENGTH; i++){
@@ -591,12 +852,33 @@ void renderMagneticPullEffect(float dt) {
 void renderSolarFlareEffect(float dt) {
   static float flareAge = 0;
   int ci = STAFF_LENGTH / 2;
-  flareAge += dt * (globalSpeed / 128.0f);
+  static float lastAccelYSF=0.0f;
+  float accelYSF=mpu_ready?clampf(accel[1]*0.8f,-1.2f,1.2f):0.0f;
+  float jerkSF=clampf((accelYSF-lastAccelYSF)*5.0f,-3.0f,3.0f); lastAccelYSF=accelYSF;
+  flareAge += dt * (globalSpeed/128.0f + (mpu_ready?fabs(accelYSF)*2.0f:0.0f));
   if(flareAge > 6.283f) flareAge -= 6.283f;
 
-  fadeToBlackBy(leds + HEAD_LENGTH, STAFF_LENGTH, 30);
+  fadeToBlackBy(leds + HEAD_LENGTH, STAFF_LENGTH, 20);
 
-  float eruption = audioLevel * 20.0f + (mpu_ready ? fabs(gyro[0])/50.0f : 0);
+  // Persistent solar corona — many LEDs always lit, bright center fading to edges
+  for (int i = 0; i < STAFF_LENGTH; i++) {
+    float pos    = (float)i / STAFF_LENGTH;
+    float dist   = fabs(pos - 0.5f) * 2.0f;
+    float corona = 1.0f - dist * dist;
+    float flicker = sin(flareAge * 4.5f + pos * 8.0f) * 0.18f + 0.82f;
+    float plasma  = sin(flareAge * 2.2f + pos * 15.0f) * 0.12f + 0.88f;
+    uint8_t h    = (uint8_t)(8 + dist * 10);
+    uint8_t v    = (uint8_t)(corona * corona * flicker * plasma * 185.0f + 12.0f);
+    leds[HEAD_LENGTH + i] += CHSV(h, 255, v);
+  }
+  // Solar granulation — random bright speckles concentrated near center
+  if (random(3) == 0) {
+    int si = random(STAFF_LENGTH);
+    float sdist = fabs((float)(si - ci)) / (float)(STAFF_LENGTH / 2);
+    if (sdist < 0.9f) leds[HEAD_LENGTH + si] += CHSV(random(25), 230, (uint8_t)((1.0f - sdist) * 160 + 60));
+  }
+
+  float eruption = audioLevel*20.0f + (mpu_ready?(fabs(accelYSF)*30.0f+fabs(jerkSF)*50.0f):0.0f);
   for(int i=0; i < (int)eruption; i++) {
     float spd = 20 + random(60);
     float p = sin(flareAge + i) * spd * dt;
@@ -606,10 +888,32 @@ void renderSolarFlareEffect(float dt) {
     if(idxR >= 0 && idxR < STAFF_LENGTH) leds[HEAD_LENGTH+idxR] += CHSV(random(20), 255, 200);
   }
   finishEffect(dt, 0.5f, 0.0f);
+  if (mpu_ready && fabs(rollRate) > 55.0f) {
+    // Solar streaks: flare jets radiate from center with frequency proportional to spin
+    float str = clampf((fabs(rollRate)-55.0f)/145.0f, 0.0f, 1.0f);
+    for (int i = 0; i < STAFF_LENGTH; i++) {
+      float pos = (float)i/(float)(STAFF_LENGTH-1);
+      float flare = sin(pos*15.71f + vortexPhase*6.0f)*0.5f+0.5f;
+      flare *= flare * (1.0f - fabs(pos-0.5f)) * str;  // falloff toward ends
+      leds[HEAD_LENGTH+i] += CHSV(15, (uint8_t)(255-flare*110), (uint8_t)(flare*230));
+    }
+  }
+  applyRollGlow(15, 255);    // solar orange-red corona when spinning
 }
 void renderMolecularVibrationEffect(float dt) {
-  int ci = STAFF_LENGTH / 2;
-  int jitter = (int)(audioLevel * 15.0f);
+  float ty = mpu_ready ? clampf(accel[1], -1.0f, 1.0f) : 0.0f;
+  static float lastAccelYMV = 0.0f;
+  float jerk = mpu_ready ? clampf((ty - lastAccelYMV)*5.0f, -3.0f, 3.0f) : 0.0f;
+  lastAccelYMV = ty;
+  int ci = STAFF_LENGTH / 2 + (int)(ty * (STAFF_LENGTH/2.5f));
+  ci = constrain(ci, 4, STAFF_LENGTH-5);
+  
+  if (fabs(jerk) > 1.5f) {
+     htState.headImpactIntensity = max(htState.headImpactIntensity, fabs(jerk)*0.8f);
+     htState.tailImpactIntensity = max(htState.tailImpactIntensity, fabs(jerk)*0.8f);
+  }
+  
+  int jitter = (int)(audioLevel * 15.0f + (mpu_ready?fabs(rollRate)*0.2f:0));
 
   for(int i=0; i<STAFF_LENGTH; i++) {
     int dist = (int)fabs((float)i - ci);
@@ -624,8 +928,19 @@ void renderMolecularVibrationEffect(float dt) {
 }
 void renderBlackHoleEffect(float dt) {
   static float horizon = 0;
-  int ci = STAFF_LENGTH / 2;
-  horizon += dt; if(horizon > 750.0f) horizon -= 750.0f;  // keep fmod(d+horizon*20,15) accurate
+  float ty = mpu_ready ? clampf(accel[1], -1.0f, 1.0f) : 0.0f;
+  static float lastAccelYBH = 0.0f;
+  float jerk = mpu_ready ? clampf((ty - lastAccelYBH)*5.0f, -3.0f, 3.0f) : 0.0f;
+  lastAccelYBH = ty;
+  int ci = STAFF_LENGTH / 2 + (int)(ty * (STAFF_LENGTH/2.5f));
+  ci = constrain(ci, 4, STAFF_LENGTH-5);
+  
+  if (fabs(jerk) > 1.5f) {
+     htState.headImpactIntensity = max(htState.headImpactIntensity, fabs(jerk)*0.8f);
+     htState.tailImpactIntensity = max(htState.tailImpactIntensity, fabs(jerk)*0.8f);
+  }
+  
+  horizon += dt*(1.0f + (mpu_ready?fabs(rollRate)*0.05f:0)); if(horizon > 750.0f) horizon -= 750.0f;  // keep fmod(d+horizon*20,15) accurate
 
   for(int i=0; i<STAFF_LENGTH; i++) {
     float d = fabs((float)i - ci);

@@ -12,13 +12,15 @@ float getFruityAccelImpact() {
 void renderWatermelonEffect(float dt) {
   uint32_t now=millis();
   float sm=globalSpeed/128.0f;
-  int ci=STAFF_LENGTH/2;
+  float ty = mpu_ready ? clampf(accel[1], -1.0f, 1.0f) : 0.0f;
+  int ci = STAFF_LENGTH/2 + (int)(ty * (STAFF_LENGTH/2.5f));
+  ci = constrain(ci, 4, STAFF_LENGTH-5);
   float sw=getFruitySwingIntensity(),ah=getFruityAccelImpact();
   if(ah>0.3f){htState.headImpactIntensity=max(htState.headImpactIntensity,ah*1.2f);htState.tailImpactIntensity=max(htState.tailImpactIntensity,ah*1.2f);}
   static const int so[]={5,12,20,28,35,42,50,57,64}; static const int ns=9;
   static float fp=0; fp+=dt*1.2f*sm; if(fp>6.283f)fp-=6.283f;
   for(int i=0;i<STAFF_LENGTH;i++){
-    float d=fabs((float)i-ci)/ci;
+    float d=fabs((float)i-ci)/((float)STAFF_LENGTH*0.5f);
     float hue=252-d*8,sat=230+d*25;
     float br=(200-d*60)*(sin(fp+d*3)*0.15f+0.85f);
     br=clampf(br+sw*50,0,255);
@@ -39,14 +41,16 @@ void renderWatermelonEffect(float dt) {
 void renderCitrusBurstEffect(float dt) {
   uint32_t now=millis();
   float sm=globalSpeed/128.0f;
-  int ci=STAFF_LENGTH/2;
+  float ty = mpu_ready ? clampf(accel[1], -1.0f, 1.0f) : 0.0f;
+  int ci = STAFF_LENGTH/2 + (int)(ty * (STAFF_LENGTH/2.5f));
+  ci = constrain(ci, 4, STAFF_LENGTH-5);
   float sw=getFruitySwingIntensity(),ah=getFruityAccelImpact();
   static float sgp=0,glp=0;
   sgp+=dt*0.8f*sm; if(sgp>6.283f)sgp-=6.283f;
   glp+=dt*2*sm; if(glp>6.283f)glp-=6.283f;
   if(ah>0.4f){htState.headImpactIntensity=max(htState.headImpactIntensity,ah*1.5f);htState.tailImpactIntensity=max(htState.tailImpactIntensity,ah*1.5f);}
   for(int i=0;i<STAFF_LENGTH;i++){
-    float d=fabs((float)i-ci)/ci;
+    float d=fabs((float)i-ci)/((float)STAFF_LENGTH*0.5f);
     int si=(int)(d*ci/8); bool even=(si%2==0);
     float sb=sin(glp+si*0.8f)*0.2f+0.8f;
     float hue,sat,val;
@@ -65,7 +69,9 @@ void renderCitrusBurstEffect(float dt) {
 void renderBerryBlastEffect(float dt) {
   uint32_t now=millis();
   float sm=globalSpeed/128.0f;
-  int ci=STAFF_LENGTH/2;
+  float ty = mpu_ready ? clampf(accel[1], -1.0f, 1.0f) : 0.0f;
+  int ci = STAFF_LENGTH/2 + (int)(ty * (STAFF_LENGTH/2.5f));
+  ci = constrain(ci, 4, STAFF_LENGTH-5);
   float sw=getFruitySwingIntensity(),ah=getFruityAccelImpact();
   #define MAX_BERRIES 8
   static float bp2[MAX_BERRIES]={0},bi2[MAX_BERRIES]={0},br2[MAX_BERRIES]={0};
@@ -80,7 +86,7 @@ void renderBerryBlastEffect(float dt) {
   }
   for(int b=0;b<MAX_BERRIES;b++)if(bi2[b]>0.05f){br2[b]+=dt*0.4f*sm;bi2[b]*=0.94f;}
   for(int i=0;i<STAFF_LENGTH;i++){
-    float d=fabs((float)i-ci)/ci;
+    float d=fabs((float)i-ci)/((float)STAFF_LENGTH*0.5f);
     float bw=sin(base-d*8)*0.3f+0.7f;
     leds[HEAD_LENGTH+i]=CHSV(200+(uint8_t)(d*40),240,(uint8_t)((80-d*40)*bw));
   }
@@ -102,14 +108,16 @@ void renderBerryBlastEffect(float dt) {
 void renderMangoSwirlEffect(float dt) {
   uint32_t now=millis();
   float sm=globalSpeed/128.0f;
-  int ci=STAFF_LENGTH/2;
+  float ty = mpu_ready ? clampf(accel[1], -1.0f, 1.0f) : 0.0f;
+  int ci = STAFF_LENGTH/2 + (int)(ty * (STAFF_LENGTH/2.5f));
+  ci = constrain(ci, 4, STAFF_LENGTH-5);
   float sw=getFruitySwingIntensity(),ah=getFruityAccelImpact();
   static float sph=0,rph=0;
   sph+=dt*(1+sw*4)*sm; if(sph>6.283f)sph-=6.283f;
   rph+=dt*3*sm; if(rph>6.283f)rph-=6.283f;
   if(ah>0.3f){htState.headImpactIntensity=max(htState.headImpactIntensity,ah*1.4f);htState.tailImpactIntensity=max(htState.tailImpactIntensity,ah*1.4f);}
   for(int i=0;i<STAFF_LENGTH;i++){
-    float d=fabs((float)i-ci)/ci;
+    float d=fabs((float)i-ci)/((float)STAFF_LENGTH*0.5f);
     float s1=sin(d*20-sph)*0.5f+0.5f,s2=sin(d*14+sph*0.7f)*0.5f+0.5f,s3=sin(d*8-sph*1.3f)*0.5f+0.5f;
     float sw2=(s1+s2+s3)/3;
     float hue=30-d*12+sw2*8,sat=255-d*30,val=(200-d*50)*(0.7f+sw2*0.4f);
@@ -124,7 +132,9 @@ void renderMangoSwirlEffect(float dt) {
 void renderKiwiSparkEffect(float dt) {
   uint32_t now=millis();
   float sm=globalSpeed/128.0f;
-  int ci=STAFF_LENGTH/2;
+  float ty = mpu_ready ? clampf(accel[1], -1.0f, 1.0f) : 0.0f;
+  int ci = STAFF_LENGTH/2 + (int)(ty * (STAFF_LENGTH/2.5f));
+  ci = constrain(ci, 4, STAFF_LENGTH-5);
   float sw=getFruitySwingIntensity(),ah=getFruityAccelImpact();
   static float kp=0,skp=0;
   kp+=dt*0.6f*sm; if(kp>6.283f)kp-=6.283f;
@@ -132,7 +142,7 @@ void renderKiwiSparkEffect(float dt) {
   if(ah>0.35f){htState.headImpactIntensity=max(htState.headImpactIntensity,ah*1.3f);htState.tailImpactIntensity=max(htState.tailImpactIntensity,ah*1.3f);}
   static const int kso[]={4,9,14,20,26,33,40,48,56}; static const int nks=9;
   for(int i=0;i<STAFF_LENGTH;i++){
-    float d=fabs((float)i-ci)/ci;
+    float d=fabs((float)i-ci)/((float)STAFF_LENGTH*0.5f);
     float fw=sin(d*12-kp)*0.2f+0.8f;
     float hue=80+d*15,sat=220+d*20,val=(160-d*50)*fw;
     if(d<0.07f){hue=50;sat=150;val=240;}
